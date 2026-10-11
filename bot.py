@@ -57,7 +57,7 @@ ITEM_SHOP = {
         "price": 500_000,
         "description": (
             "Giúp bảo vệ người dùng khỏi một lần ăn thiên phạt. "
-            "Tự kích hoạt từ túi đồ khi bị Thiên Lôi nhắm tới."
+            "Dùng `/dung_vat_pham` để tiêu thụ và kích hoạt trước khi bị nhắm tới."
         ),
         "kind": "consumable",
     },
@@ -153,6 +153,14 @@ def init_db():
                 user_id INTEGER NOT NULL,
                 item_key TEXT NOT NULL,
                 quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+                PRIMARY KEY (user_id, item_key)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS active_protections (
+                user_id INTEGER NOT NULL,
+                item_key TEXT NOT NULL,
+                charges INTEGER NOT NULL DEFAULT 0 CHECK (charges >= 0),
                 PRIMARY KEY (user_id, item_key)
             )
         """)
@@ -398,6 +406,49 @@ def refund_pending_role_item_purchase(
         return True
 
 
+def activate_armor(user_id: int):
+    """Consume one armor item and activate one persistent shield charge."""
+    item_key = "toa_tu_hoang_kim_giap"
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        item = conn.execute(
+            "SELECT quantity FROM item_inventory WHERE user_id = ? AND item_key = ?",
+            (user_id, item_key)
+        ).fetchone()
+        if item is None or item[0] <= 0:
+            conn.rollback()
+            return None
+
+        conn.execute(
+            "UPDATE item_inventory SET quantity = quantity - 1 "
+            "WHERE user_id = ? AND item_key = ? AND quantity > 0",
+            (user_id, item_key)
+        )
+        conn.execute("""
+            INSERT INTO active_protections (user_id, item_key, charges)
+            VALUES (?, ?, 1)
+            ON CONFLICT(user_id, item_key)
+            DO UPDATE SET charges = charges + 1
+        """, (user_id, item_key))
+        charges = int(conn.execute(
+            "SELECT charges FROM active_protections "
+            "WHERE user_id = ? AND item_key = ?",
+            (user_id, item_key)
+        ).fetchone()[0])
+        conn.commit()
+        return charges
+
+
+def get_active_protection_charges(user_id: int, item_key: str):
+    with sqlite3.connect(DB_FILE) as conn:
+        row = conn.execute(
+            "SELECT charges FROM active_protections "
+            "WHERE user_id = ? AND item_key = ?",
+            (user_id, item_key)
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+
 def use_thunder_item(user_id: int, target_id: int, target_is_do_kiep: bool = False):
     """Resolve Thunder atomically against Do Kiep immunity or one-use armor."""
     if user_id == target_id:
@@ -425,15 +476,15 @@ def use_thunder_item(user_id: int, target_id: int, target_is_do_kiep: bool = Fal
         ).fetchone()[0])
 
         armor = conn.execute(
-            "SELECT quantity FROM item_inventory "
+            "SELECT charges FROM active_protections "
             "WHERE user_id = ? AND item_key = 'toa_tu_hoang_kim_giap'",
             (target_id,)
         ).fetchone()
         if armor and armor[0] > 0:
             conn.execute(
-                "UPDATE item_inventory SET quantity = quantity - 1 "
+                "UPDATE active_protections SET charges = charges - 1 "
                 "WHERE user_id = ? AND item_key = 'toa_tu_hoang_kim_giap' "
-                "AND quantity > 0",
+                "AND charges > 0",
                 (target_id,)
             )
             conn.execute(
@@ -1358,7 +1409,7 @@ async def shop_vat_pham(interaction: discord.Interaction):
             inline=False
         )
     embed.set_footer(
-        text="Giáp tự chặn một lần Thiên Lôi; Độ Kiếp miễn nhiễm Thiên Lôi và tăng 50% thưởng Blackjack."
+        text="Dùng /dung_vat_pham để kích hoạt giáp; Độ Kiếp miễn nhiễm Thiên Lôi và tăng 50% thưởng Blackjack."
     )
     await interaction.response.send_message(embed=embed)
 
@@ -1509,6 +1560,11 @@ async def mua_vat_pham(
 )
 async def kho_vat_pham(interaction: discord.Interaction):
     inventory = get_item_inventory(interaction.user.id)
+    active_armor = get_active_protection_charges(
+        interaction.user.id, "toa_tu_hoang_kim_giap"
+    )
+    if active_armor:
+        inventory["active_toa_tu_hoang_kim_giap"] = active_armor
     if isinstance(interaction.user, discord.Member) and any(
         role.name == "Độ Kiếp" for role in interaction.user.roles
     ):
@@ -1521,7 +1577,9 @@ async def kho_vat_pham(interaction: discord.Interaction):
         return
     lines = []
     for key, quantity in inventory.items():
-        if key == "do_kiep_owned":
+        if key == "active_toa_tu_hoang_kim_giap":
+            lines.append(f"**🛡️ Khiên Tỏa Tử Hoàng Kim Giáp đang kích hoạt** × **{quantity} lượt chắn**")
+        elif key == "do_kiep_owned":
             lines.append("**🗡️ Độ Kiếp** — role đang sở hữu")
         else:
             lines.append(
@@ -1534,64 +1592,115 @@ async def kho_vat_pham(interaction: discord.Interaction):
 
 
 @bot.tree.command(
-    name="dung_thien_loi",
-    description="Dùng Thiên Lôi lấy 3% Bảo khố của một người chơi"
+    name="dung_vat_pham",
+    description="Dùng vật phẩm đã mua; chọn mục tiêu nếu dùng Thiên Lôi"
 )
-@app_commands.describe(nguoi_choi="Người chơi sẽ bị Thiên Lôi giáng phạt")
-async def dung_thien_loi(
+@app_commands.describe(
+    vat_pham="Chọn vật phẩm tiêu thụ để dùng",
+    nguoi_choi="Chỉ chọn người chơi này khi dùng Thiên Lôi"
+)
+@app_commands.choices(vat_pham=[
+    app_commands.Choice(
+        name=item["name"],
+        value=item_key
+    )
+    for item_key, item in ITEM_SHOP.items()
+    if item.get("kind") == "consumable"
+])
+async def dung_vat_pham(
     interaction: discord.Interaction,
-    nguoi_choi: discord.Member
+    vat_pham: app_commands.Choice[str],
+    nguoi_choi: discord.Member | None = None
 ):
     if interaction.guild is None or not isinstance(interaction.user, discord.Member):
         await interaction.response.send_message(
-            "❌ Chỉ có thể dùng Thiên Lôi lên người chơi trong server.",
-            ephemeral=True
-        )
-        return
-    if nguoi_choi.bot:
-        await interaction.response.send_message(
-            "❌ Thiên Lôi chỉ có thể nhắm vào người chơi, không thể nhắm vào bot.",
+            "❌ Lệnh dùng vật phẩm chỉ dùng được trong server.",
             ephemeral=True
         )
         return
 
-    do_kiep_role = discord.utils.get(interaction.guild.roles, name="Độ Kiếp")
-    target_is_do_kiep = do_kiep_role is not None and do_kiep_role in nguoi_choi.roles
-    status, damage, _target_balance = use_thunder_item(
-        interaction.user.id,
-        nguoi_choi.id,
-        target_is_do_kiep=target_is_do_kiep
-    )
-    if status == "protected":
+    if vat_pham.value == "thien_loi":
+        if nguoi_choi is None:
+            await interaction.response.send_message(
+                "❌ Khi dùng Thiên Lôi, hãy chọn người chơi mục tiêu.",
+                ephemeral=True
+            )
+            return
+        if nguoi_choi.bot:
+            await interaction.response.send_message(
+                "❌ Thiên Lôi chỉ có thể nhắm vào người chơi, không thể nhắm vào bot.",
+                ephemeral=True
+            )
+            return
+        if nguoi_choi.id == interaction.user.id:
+            await interaction.response.send_message(
+                "❌ Bạn không thể dùng Thiên Lôi lên chính mình.", ephemeral=True
+            )
+            return
+
+        do_kiep_role = discord.utils.get(interaction.guild.roles, name="Độ Kiếp")
+        target_is_do_kiep = do_kiep_role is not None and do_kiep_role in nguoi_choi.roles
+        status, damage, _target_balance = use_thunder_item(
+            interaction.user.id,
+            nguoi_choi.id,
+            target_is_do_kiep=target_is_do_kiep
+        )
+        if status == "protected":
+            await interaction.response.send_message(
+                f"⚡ Nhận thiên phạt từ {interaction.user.mention}, ý chí, kiên cường, "
+                f"bất khuất của **🛡️ Tỏa Tử Hoàng Kim Giáp** đã bảo vệ "
+                f"{nguoi_choi.mention} khỏi việc bị thoát kiếp!"
+            )
+            return
+        if status != "success":
+            messages = {
+                "no_item": "❌ Bạn không có **⚡ Thiên Lôi** trong túi đồ. Hãy mua tại `/shop_vat_pham`.",
+                "do_kiep_immunity": (
+                    f"⚔️ {nguoi_choi.mention} sở hữu cảnh giới **Độ Kiếp** và miễn nhiễm "
+                    "với Thiên Lôi. Vật phẩm của bạn chưa bị tiêu thụ."
+                ),
+                "target_balance_too_low": (
+                    "❌ Bảo khố của mục tiêu quá thấp để 3% tạo ra ít nhất "
+                    "1 Linh Thạch; vật phẩm chưa bị tiêu thụ."
+                ),
+            }
+            await interaction.response.send_message(
+                messages.get(status, "❌ Không thể sử dụng Thiên Lôi."),
+                ephemeral=True
+            )
+            return
+
         await interaction.response.send_message(
-            f"⚡ Nhận thiên phạt từ {interaction.user.mention}, ý chí, kiên cường, "
-            f"bất khuất của **🛡️ Tỏa Tử Hoàng Kim Giáp** đã bảo vệ "
-            f"{nguoi_choi.mention} khỏi việc bị thoát kiếp!"
+            f"⚡ {interaction.user.mention} đã thành công triệu hồi Lôi Thần "
+            f"giáng lôi phạt xuống {nguoi_choi.mention}, khiến họ mất đi "
+            f"**{damage:,} {CURRENCY_NAME}**!"
         )
         return
-    if status != "success":
-        messages = {
-            "self_target": "❌ Bạn không thể dùng Thiên Lôi lên chính mình.",
-            "no_item": "❌ Bạn không có **⚡ Thiên Lôi** trong túi đồ. Hãy mua tại `/shop_vat_pham`.",
-            "do_kiep_immunity": (
-                f"⚔️ {nguoi_choi.mention} sở hữu cảnh giới **Độ Kiếp** và miễn nhiễm "
-                "với Thiên Lôi. Vật phẩm của bạn chưa bị tiêu thụ."
-            ),
-            "target_balance_too_low": (
-                "❌ Bảo khố của mục tiêu quá thấp để 3% tạo ra ít nhất "
-                "1 Linh Thạch; vật phẩm chưa bị tiêu thụ."
-            ),
-        }
+
+    if vat_pham.value == "toa_tu_hoang_kim_giap":
+        if nguoi_choi is not None:
+            await interaction.response.send_message(
+                "❌ Không chọn mục tiêu khi dùng Tỏa Tử Hoàng Kim Giáp; "
+                "giáp sẽ bảo vệ chính bạn khỏi lần Thiên Lôi tiếp theo.",
+                ephemeral=True
+            )
+            return
+        charges = activate_armor(interaction.user.id)
+        if charges is None:
+            await interaction.response.send_message(
+                "❌ Bạn không có **🛡️ Tỏa Tử Hoàng Kim Giáp** trong túi đồ.",
+                ephemeral=True
+            )
+            return
         await interaction.response.send_message(
-            messages.get(status, "❌ Không thể sử dụng Thiên Lôi."),
+            "🛡️ Bạn đã dùng **Tỏa Tử Hoàng Kim Giáp**. Một chiếc đã được "
+            f"tiêu thụ và sẽ chặn một lần Thiên Lôi. Số lượt chắn đang kích hoạt: **{charges}**.",
             ephemeral=True
         )
         return
 
     await interaction.response.send_message(
-        f"⚡ {interaction.user.mention} đã thành công triệu hồi Lôi Thần "
-        f"giáng lôi phạt xuống {nguoi_choi.mention}, khiến họ mất đi "
-        f"**{damage:,} {CURRENCY_NAME}**!"
+        "❌ Vật phẩm này chưa thể dùng bằng lệnh này.", ephemeral=True
     )
 
 
@@ -1900,7 +2009,7 @@ async def bang_chuc_nang(interaction: discord.Interaction):
             "`/shop_vat_pham` — Xem shop vật phẩm.\n"
             "`/mua_vat_pham` — Mua vật phẩm bằng Linh Thạch.\n"
             "`/kho_vat_pham` — Xem túi vật phẩm.\n"
-            "`/dung_thien_loi nguoi_choi` — Dùng Thiên Lôi trừ 3% Bảo khố mục tiêu.\n"
+            "`/dung_vat_pham` — Chọn Thiên Lôi để tấn công hoặc dùng giáp để kích hoạt khiên.\n"
             "`/diem_danh` — Điểm danh mỗi 24 giờ.\n"
             "`/khai_thac` — Khai thác mỗi giờ.\n"
             "`/nhiem_vu` — Nhận thưởng mỗi 6 giờ.\n"
