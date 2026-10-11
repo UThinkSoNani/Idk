@@ -44,6 +44,18 @@ ROLE_SHOP = [
     ("Hợp Thể", 1_000_000),
     ("Đại Thừa", 5_000_000),
 ]
+ROLE_BET_BONUS_PERCENT = (1, 3, 5, 8, 10, 12, 15, 20)
+
+
+def get_role_bet_bonus(member, bet: int):
+    """Return (bonus_amount, bonus_percent, role_name) for the highest role."""
+    owned_role_names = {role.name for role in getattr(member, "roles", ())}
+    for (role_name, _), percent in reversed(
+        list(zip(ROLE_SHOP, ROLE_BET_BONUS_PERCENT))
+    ):
+        if role_name in owned_role_names:
+            return bet * percent // 100, percent, role_name
+    return 0, 0, None
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -359,6 +371,11 @@ class BlackjackView(View):
         super().__init__(timeout=120)
         self.user = user
         self.bet = bet
+        (
+            self.role_bonus,
+            self.role_bonus_percent,
+            self.role_bonus_name,
+        ) = get_role_bet_bonus(user, bet)
         self.deck = tao_bo_bai()
         self.player_hand = [self.deck.pop(), self.deck.pop()]
         self.dealer_hand = [self.deck.pop(), self.deck.pop()]
@@ -409,6 +426,12 @@ class BlackjackView(View):
             value=f"**{self.bet:,} {CURRENCY_NAME}**",
             inline=True
         )
+        bonus_text = (
+            f"**+{self.role_bonus_percent}%** (role {self.role_bonus_name})\n"
+            f"Thưởng nếu thắng: **+{self.role_bonus:,} {CURRENCY_NAME}**"
+            if self.role_bonus_percent else "Không có role thưởng"
+        )
+        embed.add_field(name="✨ Thưởng role", value=bonus_text, inline=True)
 
         if ket_qua:
             embed.add_field(name="📋 Kết quả", value=ket_qua, inline=False)
@@ -489,11 +512,17 @@ class BlackjackView(View):
         elif player_natural:
             # Tra lai cuoc va thuong lai 3:2
             profit = (self.bet * 3) // 2
-            update_balance(self.user.id, self.bet + profit)
+            total_profit = profit + self.role_bonus
+            update_balance(self.user.id, self.bet + total_profit)
             result = (
                 "🎉 Blackjack tự nhiên! "
-                f"Bạn nhận lại cược và lãi **{profit:,} {CURRENCY_NAME}**."
+                f"Bạn nhận lại cược và lãi **{total_profit:,} {CURRENCY_NAME}**."
             )
+            if self.role_bonus:
+                result += (
+                    f" (gồm **{self.role_bonus:,} {CURRENCY_NAME}** thưởng "
+                    f"role **{self.role_bonus_name}**)."
+                )
 
         else:
             result = (
@@ -560,16 +589,16 @@ class BlackjackView(View):
         if dealer_score > 21:
             result = (
                 f"🎉 Nhà cái quắc điểm ({dealer_score}). "
-                f"Bạn thắng và lãi **{self.bet:,} {CURRENCY_NAME}**."
+                f"Bạn thắng và lãi **{self.bet + self.role_bonus:,} {CURRENCY_NAME}**."
             )
-            refund = self.bet * 2
+            refund = self.bet * 2 + self.role_bonus
 
         elif player_score > dealer_score:
             result = (
                 f"🎉 Bạn thắng ({player_score} - {dealer_score})! "
-                f"Lãi **{self.bet:,} {CURRENCY_NAME}**."
+                f"Lãi **{self.bet + self.role_bonus:,} {CURRENCY_NAME}**."
             )
-            refund = self.bet * 2
+            refund = self.bet * 2 + self.role_bonus
 
         elif player_score < dealer_score:
             result = (
@@ -584,6 +613,13 @@ class BlackjackView(View):
                 "Cược được hoàn lại."
             )
             refund = self.bet
+
+        if self.role_bonus and refund > self.bet:
+            result += (
+                f"\n✨ Thưởng **{self.role_bonus:,} {CURRENCY_NAME}** "
+                f"từ role **{self.role_bonus_name}** "
+                f"(+{self.role_bonus_percent}% tiền cược)."
+            )
 
         await self.ket_thuc(interaction, result, refund)
 
@@ -808,6 +844,7 @@ async def bang_chuc_nang(interaction: discord.Interaction):
         title="📜 Bảng chức năng",
         description=(
             "`/blackjack cuoc` — Chơi Blackjack.\n"
+            "Sở hữu role shop sẽ tăng tiền lãi Blackjack khi thắng (chỉ áp dụng role bậc cao nhất).\n"
             "`/balance` — Xem số dư.\n"
             "`/leaderboard` — Xem top người chơi và hạng của bạn.\n"
             "`/shop` — Xem role tu luyện và giá.\n"
