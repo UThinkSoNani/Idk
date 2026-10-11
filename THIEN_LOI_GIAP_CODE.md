@@ -1,6 +1,6 @@
-# Code tham chiếu: Thiên Lôi và Tỏa Tử Hoàng Kim Giáp
+# Code tham chiếu: Shop vật phẩm và buff thưởng
 
-**Lệnh dùng vật phẩm mới:** `/dung_vat_pham` — người chơi chọn Thiên Lôi hoặc Tỏa Tử Hoàng Kim Giáp trong danh sách. Giáp trong inventory **không tự bảo vệ**: người chơi phải dùng để tiêu thụ và kích hoạt trước; trạng thái chắn còn hiệu lực qua lần bot khởi động lại.
+`/dung_vat_pham` cho phép chọn Thiên Lôi, Tỏa Tử Hoàng Kim Giáp hoặc Đan Dược Trường Sinh. Đan Dược tiêu thụ một vật phẩm và cộng 5% vào mỗi khoản thưởng thành công trong 10 phút; giáp phải được dùng trước để kích hoạt lượt chắn.
 
 Code đầy đủ nằm trong [`bot.py`](./bot.py). Hướng dẫn này trích các phần chính và cách nối chúng với hệ thống shop.
 
@@ -21,6 +21,12 @@ ITEM_SHOP = {
             "Giúp bảo vệ người dùng khỏi một lần ăn thiên phạt. "
             "Dùng `/dung_vat_pham` để tiêu thụ và kích hoạt trước khi bị nhắm tới."
         ),
+        "kind": "consumable",
+    },
+    "dan_duoc_truong_sinh": {
+        "name": "🧪 Đan Dược Trường Sinh",
+        "price": 10_000,
+        "description": "Vật phẩm bí ẩn, không có công dụng cụ thể.",
         "kind": "consumable",
     },
     "do_kiep": {
@@ -54,6 +60,14 @@ conn.execute("""
         item_key TEXT NOT NULL,
         charges INTEGER NOT NULL DEFAULT 0 CHECK (charges >= 0),
         PRIMARY KEY (user_id, item_key)
+    )
+""")
+conn.execute("""
+    CREATE TABLE IF NOT EXISTS user_reward_buffs (
+        user_id INTEGER NOT NULL,
+        buff_key TEXT NOT NULL,
+        expires_at REAL NOT NULL,
+        PRIMARY KEY (user_id, buff_key)
     )
 """)
 ```
@@ -242,16 +256,47 @@ async def dung_vat_pham(
     #   rồi gọi use_thunder_item(...).
     # - nếu vat_pham.value == "toa_tu_hoang_kim_giap", không nhận target,
     #   gọi activate_armor(interaction.user.id), báo số lượt chắn đang kích hoạt.
+    # - nếu vat_pham.value == "dan_duoc_truong_sinh", không nhận target,
+    #   gọi activate_reward_potion(interaction.user.id).
     ...
 ```
 
 Handler hoàn chỉnh với mọi phản hồi lỗi và thông báo thành công nằm trong `bot.py`; snippet trên thể hiện phần đăng ký lệnh và choices. Discord hiển thị tên command dạng ASCII `/dung_vat_pham` (tên slash command không chứa dấu hoặc khoảng trắng); menu `vat_pham` là nơi người chơi chọn vật phẩm.
 
-## 7. Dùng trong server
+## 7. Buff thưởng Đan Dược Trường Sinh
+
+Khi dùng thuốc, `activate_reward_potion()` tiêu thụ một món và ghi thời điểm hết hạn vào `user_reward_buffs`. Dùng thêm khi buff đang chạy làm mới thời hạn thành 10 phút kể từ lần dùng mới nhất; mức cộng vẫn là 5%, không cộng dồn phần trăm.
+
+```python
+DAN_DUOC_DURATION_SECONDS = 10 * 60
+DAN_DUOC_REWARD_BONUS_PERCENT = 5
+REWARD_BUFFABLE_TYPES = frozenset(REWARD_SETTINGS)
+
+# Trong claim_reward(), sau khi kiểm tra cooldown và rút thưởng gốc:
+bonus = 0
+if reward_type in REWARD_BUFFABLE_TYPES:
+    active_buff = conn.execute(
+        "SELECT expires_at FROM user_reward_buffs "
+        "WHERE user_id = ? AND buff_key = 'dan_duoc_truong_sinh'",
+        (user_id,)
+    ).fetchone()
+    if active_buff and active_buff[0] > now:
+        bonus = reward * DAN_DUOC_REWARD_BONUS_PERCENT // 100
+
+conn.execute(
+    "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+    (reward + bonus, user_id)
+)
+return True, reward, bonus
+```
+
+`REWARD_SETTINGS` hiện gồm điểm danh, khai thác, nhiệm vụ và chat. Các lệnh này không có trạng thái thắng/thua; Đan Dược tăng số Linh Thạch của mỗi lần nhận thưởng thành công, không thay đổi xác suất Blackjack. Phần trăm được tính trên khoản thưởng gốc đã random, chia nguyên xuống.
+
+## 8. Dùng trong server
 
 1. `/shop_vat_pham` — xem giá.
-2. `/mua_vat_pham` — mua Thiên Lôi hoặc giáp.
-3. `/dung_vat_pham` — chọn Thiên Lôi rồi chọn người chơi mục tiêu; hoặc chọn giáp để tiêu thụ và kích hoạt một lượt chắn cho chính mình.
-4. `/kho_vat_pham` — xem vật phẩm chưa dùng và lượt chắn đang kích hoạt.
+2. `/mua_vat_pham` — mua vật phẩm trong shop.
+3. `/dung_vat_pham` — chọn Thiên Lôi để nhắm thành viên; chọn giáp để tiêu thụ và kích hoạt lượt chắn; hoặc chọn Đan Dược để bật buff +5% thưởng trong 10 phút.
+4. `/kho_vat_pham` — xem vật phẩm chưa dùng, lượt chắn và thời gian buff còn lại.
 
-Sau khi cập nhật, khởi động/redeploy bot để `bot.tree.sync()` đăng ký lệnh mới và gỡ lệnh `/dung_thien_loi` cũ. Bảng `active_protections` được tạo tự động bởi `init_db()`.
+Sau khi cập nhật, khởi động/redeploy bot để `bot.tree.sync()` đăng ký lựa chọn vật phẩm. Các bảng `active_protections` và `user_reward_buffs` được tạo tự động bởi `init_db()`.

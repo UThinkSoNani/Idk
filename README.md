@@ -23,8 +23,10 @@ For `/blackjack`, either enter a direct wager from 10 to 100,000 Linh Thạch, o
 
 Use `/phat_bao_li_xi tong_tien so_suat` in a server channel to create a public, clickable red envelope. The total pool is reserved from the creator's Bảo khố; each member can claim once for a random whole-number share (at least 1 Linh Thạch per slot). Envelopes expire after 10 minutes, and any unclaimed amount is returned to the creator. Active envelopes are also refunded and closed if the bot restarts before they expire.
 
-## Item shop: Thunder
+## Item shop: Thunder and reward items
 
 Use `/shop_vat_pham` to view all items and `/mua_vat_pham` to buy them. Use `/dung_vat_pham` and select an item from the dropdown. For **⚡ Thiên Lôi** (300,000 Linh Thạch), also select another non-bot member as the target; on a successful hit it removes 3% of their current Bảo khố, rounded down. If 3% rounds to zero or the target is immune, the Thunder item is not consumed.
 
 **🛡️ Tỏa Tử Hoàng Kim Giáp** costs 500,000 Linh Thạch. Buying it only puts it in inventory; it has no effect until the owner selects it in `/dung_vat_pham`. Using it consumes one armor and activates one shield charge, which blocks the next Thunder attack; the attacker's Thunder item is also consumed by the blocked attempt. `/kho_vat_pham` displays activated shield charges. **🗡️ Độ Kiếp** costs 99,999,999 Linh Thạch and can only be purchased by a member who has the Discord role **Hợp Thể**. Buying it grants the server role **Độ Kiếp**, which grants an additional Blackjack win bonus of 50% of the original wager and permanently prevents Thunder attacks. An immune target does not consume the attacker's Thunder item. Create Discord roles named `Hợp Thể` and `Độ Kiếp`; the bot needs Manage Roles and its highest role must be above `Độ Kiếp`.
+
+**🧪 Đan Dược Trường Sinh** costs 10,000 Linh Thạch. Use it via `/dung_vat_pham`; one pill is consumed and gives **+5%** to each successful reward claim for 10 minutes: `/diem_danh`, `/khai_thac`, `/nhiem_vu`, and chat rewards. The bonus is calculated from the randomized base reward and rounded down to a whole Linh Thạch. Using another pill while the effect is active refreshes the timer to 10 minutes; the percentage does not stack. These activities do not currently have win/loss odds, so the pill increases reward amounts and does not change Blackjack odds.

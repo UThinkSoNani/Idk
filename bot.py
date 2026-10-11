@@ -61,6 +61,12 @@ ITEM_SHOP = {
         ),
         "kind": "consumable",
     },
+    "dan_duoc_truong_sinh": {
+        "name": "🧪 Đan Dược Trường Sinh",
+        "price": 10_000,
+        "description": "Vật phẩm bí ẩn, không có công dụng cụ thể.",
+        "kind": "consumable",
+    },
     "do_kiep": {
         "name": "🗡️ Độ Kiếp",
         "price": 99_999_999,
@@ -162,6 +168,14 @@ def init_db():
                 item_key TEXT NOT NULL,
                 charges INTEGER NOT NULL DEFAULT 0 CHECK (charges >= 0),
                 PRIMARY KEY (user_id, item_key)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_reward_buffs (
+                user_id INTEGER NOT NULL,
+                buff_key TEXT NOT NULL,
+                expires_at REAL NOT NULL,
+                PRIMARY KEY (user_id, buff_key)
             )
         """)
         conn.execute("""
@@ -447,6 +461,46 @@ def get_active_protection_charges(user_id: int, item_key: str):
             (user_id, item_key)
         ).fetchone()
         return int(row[0]) if row else 0
+
+
+def activate_reward_potion(user_id: int):
+    """Consume one longevity pill and activate/refresh its 10-minute reward buff."""
+    item_key = "dan_duoc_truong_sinh"
+    now = time.time()
+    expires_at = now + DAN_DUOC_DURATION_SECONDS
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        item = conn.execute(
+            "SELECT quantity FROM item_inventory WHERE user_id = ? AND item_key = ?",
+            (user_id, item_key)
+        ).fetchone()
+        if item is None or item[0] <= 0:
+            conn.rollback()
+            return None
+
+        conn.execute(
+            "UPDATE item_inventory SET quantity = quantity - 1 "
+            "WHERE user_id = ? AND item_key = ? AND quantity > 0",
+            (user_id, item_key)
+        )
+        conn.execute("""
+            INSERT INTO user_reward_buffs (user_id, buff_key, expires_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id, buff_key)
+            DO UPDATE SET expires_at = excluded.expires_at
+        """, (user_id, item_key, expires_at))
+        conn.commit()
+        return expires_at
+
+
+def get_reward_buff_seconds(user_id: int):
+    with sqlite3.connect(DB_FILE) as conn:
+        row = conn.execute(
+            "SELECT expires_at FROM user_reward_buffs "
+            "WHERE user_id = ? AND buff_key = 'dan_duoc_truong_sinh'",
+            (user_id,)
+        ).fetchone()
+    return max(0, int(row[0] - time.time())) if row else 0
 
 
 def use_thunder_item(user_id: int, target_id: int, target_is_do_kiep: bool = False):
@@ -768,12 +822,14 @@ REWARD_SETTINGS = {
         "maximum": 50,
     },
 }
+DAN_DUOC_DURATION_SECONDS = 10 * 60
+DAN_DUOC_REWARD_BONUS_PERCENT = 5
+REWARD_BUFFABLE_TYPES = frozenset(REWARD_SETTINGS)
 
 
 def claim_reward(user_id: int, reward_type: str):
     """
-    Tra ve (True, so_thuong) neu thanh cong.
-    Tra ve (False, so_giay_con_cho) neu chua het cooldown.
+    Return (success, base reward/remaining cooldown, potion bonus).
     """
     settings = REWARD_SETTINGS[reward_type]
     now = time.time()
@@ -796,16 +852,25 @@ def claim_reward(user_id: int, reward_type: str):
             remaining = settings["cooldown"] - (now - row[0])
             if remaining > 0:
                 conn.rollback()
-                return False, int(remaining) + 1
+                return False, int(remaining) + 1, 0
 
         reward = random.randint(
             settings["minimum"],
             settings["maximum"]
         )
+        bonus = 0
+        if reward_type in REWARD_BUFFABLE_TYPES:
+            active_buff = conn.execute(
+                "SELECT expires_at FROM user_reward_buffs "
+                "WHERE user_id = ? AND buff_key = 'dan_duoc_truong_sinh'",
+                (user_id,)
+            ).fetchone()
+            if active_buff and active_buff[0] > now:
+                bonus = reward * DAN_DUOC_REWARD_BONUS_PERCENT // 100
 
         conn.execute(
             "UPDATE users SET balance = balance + ? WHERE user_id = ?",
-            (reward, user_id)
+            (reward + bonus, user_id)
         )
 
         conn.execute("""
@@ -816,7 +881,7 @@ def claim_reward(user_id: int, reward_type: str):
         """, (user_id, reward_type, now))
 
         conn.commit()
-        return True, reward
+        return True, reward, bonus
 
 
 def dinh_dang_thoi_gian(seconds: int) -> str:
@@ -839,7 +904,7 @@ async def xu_ly_nhan_thuong(
     reward_type: str
 ):
     settings = REWARD_SETTINGS[reward_type]
-    success, value = claim_reward(interaction.user.id, reward_type)
+    success, value, bonus = claim_reward(interaction.user.id, reward_type)
 
     if not success:
         await interaction.response.send_message(
@@ -850,8 +915,13 @@ async def xu_ly_nhan_thuong(
         return
 
     balance = get_balance(interaction.user.id)
+    reward_total = value + bonus
+    bonus_text = (
+        f" (gồm **{value:,}** + **{bonus:,}** thưởng Đan Dược)"
+        if bonus else ""
+    )
     await interaction.response.send_message(
-        f"🎉 Bạn nhận được **{value:,} {CURRENCY_NAME}** "
+        f"🎉 Bạn nhận được **{reward_total:,} {CURRENCY_NAME}**{bonus_text} "
         f"từ **{settings['name']}**!\n"
         f"💎 Bảo khố hiện tại: **{balance:,} {CURRENCY_NAME}**."
     )
@@ -1409,7 +1479,7 @@ async def shop_vat_pham(interaction: discord.Interaction):
             inline=False
         )
     embed.set_footer(
-        text="Dùng /dung_vat_pham để kích hoạt giáp; Độ Kiếp miễn nhiễm Thiên Lôi và tăng 50% thưởng Blackjack."
+        text="Dùng /dung_vat_pham để kích hoạt giáp hoặc Đan Dược (+5% thưởng trong 10 phút); Độ Kiếp miễn nhiễm Thiên Lôi và tăng 50% thưởng Blackjack."
     )
     await interaction.response.send_message(embed=embed)
 
@@ -1560,6 +1630,9 @@ async def mua_vat_pham(
 )
 async def kho_vat_pham(interaction: discord.Interaction):
     inventory = get_item_inventory(interaction.user.id)
+    active_potion_seconds = get_reward_buff_seconds(interaction.user.id)
+    if active_potion_seconds:
+        inventory["active_dan_duoc_truong_sinh"] = active_potion_seconds
     active_armor = get_active_protection_charges(
         interaction.user.id, "toa_tu_hoang_kim_giap"
     )
@@ -1577,7 +1650,12 @@ async def kho_vat_pham(interaction: discord.Interaction):
         return
     lines = []
     for key, quantity in inventory.items():
-        if key == "active_toa_tu_hoang_kim_giap":
+        if key == "active_dan_duoc_truong_sinh":
+            lines.append(
+                "**🧪 Đan Dược Trường Sinh đang hiệu lực** — tăng **5%** "
+                f"thưởng, còn **{dinh_dang_thoi_gian(quantity)}**"
+            )
+        elif key == "active_toa_tu_hoang_kim_giap":
             lines.append(f"**🛡️ Khiên Tỏa Tử Hoàng Kim Giáp đang kích hoạt** × **{quantity} lượt chắn**")
         elif key == "do_kiep_owned":
             lines.append("**🗡️ Độ Kiếp** — role đang sở hữu")
@@ -1696,6 +1774,27 @@ async def dung_vat_pham(
             "🛡️ Bạn đã dùng **Tỏa Tử Hoàng Kim Giáp**. Một chiếc đã được "
             f"tiêu thụ và sẽ chặn một lần Thiên Lôi. Số lượt chắn đang kích hoạt: **{charges}**.",
             ephemeral=True
+        )
+        return
+
+    if vat_pham.value == "dan_duoc_truong_sinh":
+        if nguoi_choi is not None:
+            await interaction.response.send_message(
+                "❌ Đan Dược Trường Sinh chỉ dùng cho chính bạn; không chọn mục tiêu.",
+                ephemeral=True
+            )
+            return
+        expires_at = activate_reward_potion(interaction.user.id)
+        if expires_at is None:
+            await interaction.response.send_message(
+                "❌ Bạn không có **🧪 Đan Dược Trường Sinh** trong túi đồ.",
+                ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            f"🧪 {interaction.user.mention} đã sử dụng vật phẩm "
+            "**Đan Dược Trường Sinh**.\n"
+            "✨ Mỗi lần nhận thưởng thành công trong 10 phút tới được cộng thêm **5%**."
         )
         return
 
@@ -2009,7 +2108,7 @@ async def bang_chuc_nang(interaction: discord.Interaction):
             "`/shop_vat_pham` — Xem shop vật phẩm.\n"
             "`/mua_vat_pham` — Mua vật phẩm bằng Linh Thạch.\n"
             "`/kho_vat_pham` — Xem túi vật phẩm.\n"
-            "`/dung_vat_pham` — Chọn Thiên Lôi để tấn công hoặc dùng giáp để kích hoạt khiên.\n"
+            "`/dung_vat_pham` — Chọn Thiên Lôi, kích hoạt giáp hoặc dùng Đan Dược (+5% thưởng trong 10 phút).\n"
             "`/diem_danh` — Điểm danh mỗi 24 giờ.\n"
             "`/khai_thac` — Khai thác mỗi giờ.\n"
             "`/nhiem_vu` — Nhận thưởng mỗi 6 giờ.\n"
@@ -2063,7 +2162,7 @@ async def on_message(message: discord.Message):
 
     # Chi xet tin nhan dai it nhat 5 ky tu
     if len(message.content.strip()) >= 5:
-        success, reward = claim_reward(message.author.id, "chat")
+        success, reward, _bonus = claim_reward(message.author.id, "chat")
 
         # Khong gui thong bao moi tin nhan de tranh spam kenh
         # Nguoi choi co the dung /balance de xem so du.
