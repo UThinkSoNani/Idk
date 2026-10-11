@@ -437,7 +437,7 @@ class BlackjackView(View):
             embed.add_field(name="📋 Kết quả", value=ket_qua, inline=False)
 
         embed.set_footer(
-            text="Điểm trong trò chơi — không có giá trị tiền thật."
+            text="Thua Là Do Bạn - Không Phải Do Tôi"
         )
         return embed
 
