@@ -45,6 +45,12 @@ ROLE_SHOP = [
     ("Đại Thừa", 5_000_000),
 ]
 ROLE_BET_BONUS_PERCENT = (1, 3, 5, 8, 10, 12, 15, 20)
+ITEM_SHOP = {
+    "thien_loi": {
+        "name": "⚡ Thiên Lôi",
+        "price": 300_000,
+    }
+}
 
 
 def get_role_bet_bonus(member, bet: int):
@@ -119,6 +125,14 @@ def init_db():
                 amount INTEGER NOT NULL,
                 claimed_at REAL NOT NULL,
                 PRIMARY KEY (envelope_id, user_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS item_inventory (
+                user_id INTEGER NOT NULL,
+                item_key TEXT NOT NULL,
+                quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+                PRIMARY KEY (user_id, item_key)
             )
         """)
         conn.commit()
@@ -236,6 +250,96 @@ def spend_balance(user_id: int, amount: int):
         ).fetchone()[0]
         conn.commit()
         return int(balance)
+
+
+def buy_item(user_id: int, item_key: str):
+    """Atomically charge the shop price and add one item to inventory."""
+    item = ITEM_SHOP.get(item_key)
+    if item is None:
+        return None
+    price = item["price"]
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, ?)",
+            (user_id, STARTING_BALANCE)
+        )
+        cursor = conn.execute(
+            "UPDATE users SET balance = balance - ? "
+            "WHERE user_id = ? AND balance >= ?",
+            (price, user_id, price)
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return None
+        conn.execute("""
+            INSERT INTO item_inventory (user_id, item_key, quantity)
+            VALUES (?, ?, 1)
+            ON CONFLICT(user_id, item_key)
+            DO UPDATE SET quantity = quantity + 1
+        """, (user_id, item_key))
+        balance = conn.execute(
+            "SELECT balance FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()[0]
+        quantity = conn.execute(
+            "SELECT quantity FROM item_inventory WHERE user_id = ? AND item_key = ?",
+            (user_id, item_key)
+        ).fetchone()[0]
+        conn.commit()
+        return int(balance), int(quantity)
+
+
+def get_item_inventory(user_id: int):
+    with sqlite3.connect(DB_FILE) as conn:
+        rows = conn.execute(
+            "SELECT item_key, quantity FROM item_inventory "
+            "WHERE user_id = ? AND quantity > 0 ORDER BY item_key",
+            (user_id,)
+        ).fetchall()
+        return {item_key: int(quantity) for item_key, quantity in rows}
+
+
+def use_thunder_item(user_id: int, target_id: int):
+    """Consume one Thunder item and remove 3% of the target's live balance."""
+    if user_id == target_id:
+        return "self_target", 0, 0
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        item = conn.execute(
+            "SELECT quantity FROM item_inventory "
+            "WHERE user_id = ? AND item_key = 'thien_loi'",
+            (user_id,)
+        ).fetchone()
+        if item is None or item[0] <= 0:
+            conn.rollback()
+            return "no_item", 0, 0
+
+        conn.execute(
+            "INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, ?)",
+            (target_id, STARTING_BALANCE)
+        )
+        target_balance = int(conn.execute(
+            "SELECT balance FROM users WHERE user_id = ?", (target_id,)
+        ).fetchone()[0])
+        damage = target_balance * 3 // 100
+        if damage < 1:
+            conn.rollback()
+            return "target_balance_too_low", 0, target_balance
+
+        conn.execute(
+            "UPDATE users SET balance = balance - ? WHERE user_id = ?",
+            (damage, target_id)
+        )
+        conn.execute(
+            "UPDATE item_inventory SET quantity = quantity - 1 "
+            "WHERE user_id = ? AND item_key = 'thien_loi' AND quantity > 0",
+            (user_id,)
+        )
+        balance_after = int(conn.execute(
+            "SELECT balance FROM users WHERE user_id = ?", (target_id,)
+        ).fetchone()[0])
+        conn.commit()
+        return "success", int(damage), balance_after
 
 
 def transfer_balance(sender_id: int, recipient_id: int, amount: int):
@@ -1115,6 +1219,140 @@ async def balance(interaction: discord.Interaction):
 
 
 @bot.tree.command(
+    name="shop_vat_pham",
+    description="Xem shop vật phẩm Linh Thạch"
+)
+async def shop_vat_pham(interaction: discord.Interaction):
+    item = ITEM_SHOP["thien_loi"]
+    embed = discord.Embed(
+        title="🛒 Shop vật phẩm",
+        description=(
+            f"**{item['name']}** — **{item['price']:,} {CURRENCY_NAME}**\n"
+            "Dùng `/mua_vat_pham` để mua và `/dung_thien_loi` để sử dụng. "
+            "Khi trúng, Thiên Lôi lấy 3% Bảo khố hiện tại của mục tiêu "
+            "(làm tròn xuống)."
+        ),
+        color=0xF1C40F
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(
+    name="mua_vat_pham",
+    description="Dùng Linh Thạch mua vật phẩm trong shop"
+)
+@app_commands.describe(vat_pham="Chọn vật phẩm muốn mua")
+@app_commands.choices(vat_pham=[
+    app_commands.Choice(
+        name=f"{item['name']} — {item['price']:,} Linh Thạch",
+        value=item_key
+    )
+    for item_key, item in ITEM_SHOP.items()
+])
+async def mua_vat_pham(
+    interaction: discord.Interaction,
+    vat_pham: app_commands.Choice[str]
+):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "❌ Lệnh mua vật phẩm chỉ dùng được trong server.", ephemeral=True
+        )
+        return
+    item = ITEM_SHOP.get(vat_pham.value)
+    if item is None:
+        await interaction.response.send_message(
+            "❌ Vật phẩm này không tồn tại trong shop.", ephemeral=True
+        )
+        return
+
+    purchase = buy_item(interaction.user.id, vat_pham.value)
+    if purchase is None:
+        bao_kho = get_balance(interaction.user.id)
+        await interaction.response.send_message(
+            f"❌ Bảo khố không đủ mua **{item['name']}** "
+            f"(giá **{item['price']:,} {CURRENCY_NAME}**). "
+            f"Bảo khố hiện có: **{bao_kho:,} {CURRENCY_NAME}**.",
+            ephemeral=True
+        )
+        return
+    balance, quantity = purchase
+    await interaction.response.send_message(
+        f"✅ Đã mua **{item['name']}**. Túi đồ hiện có **{quantity}** chiếc; "
+        f"Bảo khố còn **{balance:,} {CURRENCY_NAME}**.",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(
+    name="kho_vat_pham",
+    description="Xem vật phẩm bạn đang sở hữu"
+)
+async def kho_vat_pham(interaction: discord.Interaction):
+    inventory = get_item_inventory(interaction.user.id)
+    if not inventory:
+        await interaction.response.send_message(
+            "🎒 Túi đồ của bạn hiện đang trống. Dùng `/shop_vat_pham` để xem shop.",
+            ephemeral=True
+        )
+        return
+    lines = [
+        f"**{ITEM_SHOP.get(key, {'name': key})['name']}** × **{quantity}**"
+        for key, quantity in inventory.items()
+    ]
+    await interaction.response.send_message(
+        "🎒 **Túi vật phẩm của bạn**\n" + "\n".join(lines),
+        ephemeral=True
+    )
+
+
+@bot.tree.command(
+    name="dung_thien_loi",
+    description="Dùng Thiên Lôi lấy 3% Bảo khố của một người chơi"
+)
+@app_commands.describe(nguoi_choi="Người chơi sẽ bị Thiên Lôi giáng phạt")
+async def dung_thien_loi(
+    interaction: discord.Interaction,
+    nguoi_choi: discord.Member
+):
+    if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(
+            "❌ Chỉ có thể dùng Thiên Lôi lên người chơi trong server.",
+            ephemeral=True
+        )
+        return
+    if nguoi_choi.bot:
+        await interaction.response.send_message(
+            "❌ Thiên Lôi chỉ có thể nhắm vào người chơi, không thể nhắm vào bot.",
+            ephemeral=True
+        )
+        return
+
+    status, damage, _target_balance = use_thunder_item(
+        interaction.user.id, nguoi_choi.id
+    )
+    if status != "success":
+        messages = {
+            "self_target": "❌ Bạn không thể dùng Thiên Lôi lên chính mình.",
+            "no_item": "❌ Bạn không có **⚡ Thiên Lôi** trong túi đồ. Hãy mua tại `/shop_vat_pham`.",
+            "target_balance_too_low": (
+                "❌ Bảo khố của mục tiêu quá thấp để 3% tạo ra ít nhất "
+                "1 Linh Thạch; vật phẩm chưa bị tiêu thụ."
+            ),
+        }
+        await interaction.response.send_message(
+            messages.get(status, "❌ Không thể sử dụng Thiên Lôi."),
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"⚡ {interaction.user.mention} đã thành công triệu hồi Lôi Thần "
+        f"giáng lôi phạt xuống {nguoi_choi.mention}, khiến họ mất đi "
+        f"**{damage:,} {CURRENCY_NAME}**!"
+    )
+
+
+@bot.tree.command(
     name="phat_bao_li_xi",
     description="Phát bao lì xì ngẫu nhiên cho người chơi trong server"
 )
@@ -1414,6 +1652,10 @@ async def bang_chuc_nang(interaction: discord.Interaction):
             "`/leaderboard` — Xem top người chơi và hạng của bạn.\n"
             "`/shop` — Xem role tu luyện và giá.\n"
             "`/mua_role` — Mua role kế tiếp bằng Linh Thạch.\n"
+            "`/shop_vat_pham` — Xem shop vật phẩm.\n"
+            "`/mua_vat_pham` — Mua vật phẩm bằng Linh Thạch.\n"
+            "`/kho_vat_pham` — Xem túi vật phẩm.\n"
+            "`/dung_thien_loi nguoi_choi` — Dùng Thiên Lôi trừ 3% Bảo khố mục tiêu.\n"
             "`/diem_danh` — Điểm danh mỗi 24 giờ.\n"
             "`/khai_thac` — Khai thác mỗi giờ.\n"
             "`/nhiem_vu` — Nhận thưởng mỗi 6 giờ.\n"

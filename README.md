@@ -22,3 +22,7 @@ For `/blackjack`, either enter a direct wager from 10 to 100,000 Linh Thạch, o
 ## Server red envelopes
 
 Use `/phat_bao_li_xi tong_tien so_suat` in a server channel to create a public, clickable red envelope. The total pool is reserved from the creator's Bảo khố; each member can claim once for a random whole-number share (at least 1 Linh Thạch per slot). Envelopes expire after 10 minutes, and any unclaimed amount is returned to the creator. Active envelopes are also refunded and closed if the bot restarts before they expire.
+
+## Item shop: Thunder
+
+Use `/shop_vat_pham` to view the item, `/mua_vat_pham` to buy **⚡ Thiên Lôi** for 300,000 Linh Thạch, and `/kho_vat_pham` to see your inventory. Use `/dung_thien_loi nguoi_choi` to consume one item and remove 3% of that player's current Bảo khố (rounded down). The target must be another non-bot member of the same server; if 3% rounds to zero, the item is not consumed.
