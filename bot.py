@@ -523,7 +523,8 @@ class BlackjackView(View):
             total_profit = profit + self.role_bonus
             update_balance(self.user.id, self.bet + total_profit)
             result = (
-                "🎉 Blackjack tự nhiên! "
+                "🌟 Trời Độ - Bạn May Mắn Rút Được Thẻ SSR Siêu Hiếm. "
+                "Nhà Cái Liền Gục Ngã Trước Năm Triệu Điểm Sức Mạnh Của Bạn.\n"
                 f"Đã trả về ví **+{self.bet + total_profit:,} {CURRENCY_NAME}** "
                 f"(gồm cược **{self.bet:,}** và lãi "
                 f"**{total_profit:,} {CURRENCY_NAME}**)."
@@ -598,15 +599,17 @@ class BlackjackView(View):
 
         if dealer_score > 21:
             result = (
-                f"🎉 Nhà cái quắc điểm ({dealer_score}). "
-                f"Bạn thắng và lãi **{self.bet + self.role_bonus:,} {CURRENCY_NAME}**."
+                "⚡ Nhà Cái Ăn Thiên Lôi! Bạn May Mắn Thoát Nạn. "
+                f"Nhận Về **{self.bet + self.role_bonus:,} {CURRENCY_NAME}** "
+                "làm phần thưởng."
             )
             refund = self.bet * 2 + self.role_bonus
 
         elif player_score > dealer_score:
             result = (
-                f"🎉 Bạn thắng ({player_score} - {dealer_score})! "
-                f"Lãi **{self.bet + self.role_bonus:,} {CURRENCY_NAME}**."
+                "⚡ Nhà Cái Ăn Thiên Lôi! Bạn May Mắn Thoát Nạn. "
+                f"Nhận Về **{self.bet + self.role_bonus:,} {CURRENCY_NAME}** "
+                "làm phần thưởng."
             )
             refund = self.bet * 2 + self.role_bonus
 
