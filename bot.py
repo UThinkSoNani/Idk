@@ -69,6 +69,35 @@ def get_balance(user_id: int) -> int:
         return int(row[0])
 
 
+def get_leaderboard(limit: int = 10):
+    """Return the highest balances and total number of players."""
+    with sqlite3.connect(DB_FILE) as conn:
+        rows = conn.execute(
+            "SELECT user_id, balance FROM users "
+            "ORDER BY balance DESC, user_id ASC LIMIT ?",
+            (limit,)
+        ).fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        return rows, int(total)
+
+
+def get_player_rank(user_id: int):
+    """Return (rank, balance), using user_id as a stable tie-breaker."""
+    with sqlite3.connect(DB_FILE) as conn:
+        row = conn.execute(
+            "SELECT balance FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        balance = int(row[0])
+        ahead = conn.execute(
+            "SELECT COUNT(*) FROM users "
+            "WHERE balance > ? OR (balance = ? AND user_id < ?)",
+            (balance, balance, user_id)
+        ).fetchone()[0]
+        return int(ahead) + 1, balance
+
+
 def set_balance(user_id: int, amount: int) -> int:
     amount = max(0, int(amount))
     with sqlite3.connect(DB_FILE) as conn:
@@ -561,6 +590,44 @@ async def balance(interaction: discord.Interaction):
 
 
 @bot.tree.command(
+    name="leaderboard",
+    description="Xem bảng xếp hạng người chơi theo số dư Linh Thạch"
+)
+async def leaderboard(interaction: discord.Interaction):
+    rows, total = get_leaderboard(10)
+    player_rank = get_player_rank(interaction.user.id)
+
+    if rows:
+        medals = ("🥇", "🥈", "🥉")
+        lines = []
+        for rank, (user_id, amount) in enumerate(rows, start=1):
+            marker = medals[rank - 1] if rank <= len(medals) else f"**{rank}.**"
+            lines.append(
+                f"{marker} <@{user_id}> — **{amount:,} {CURRENCY_NAME}**"
+            )
+        description = "\n".join(lines)
+    else:
+        description = "Chưa có dữ liệu người chơi."
+
+    if player_rank:
+        rank, amount = player_rank
+        description += (
+            f"\n\n**Hạng của bạn:** #{rank} / {total}"
+            f" — **{amount:,} {CURRENCY_NAME}**"
+        )
+    else:
+        description += "\n\nBạn chưa có trong bảng xếp hạng; hãy dùng `/balance` để bắt đầu."
+
+    embed = discord.Embed(
+        title="🏆 Bảng xếp hạng Linh Thạch",
+        description=description,
+        color=0xF1C40F
+    )
+    embed.set_footer(text="Xếp hạng toàn bộ người chơi của bot theo số dư hiện tại.")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(
     name="bang-chuc-nang",
     description="Xem các chức năng của bot"
 )
@@ -570,6 +637,7 @@ async def bang_chuc_nang(interaction: discord.Interaction):
         description=(
             "`/blackjack cuoc` — Chơi Blackjack.\n"
             "`/balance` — Xem số dư.\n"
+            "`/leaderboard` — Xem top người chơi và hạng của bạn.\n"
             "`/diem_danh` — Điểm danh mỗi 24 giờ.\n"
             "`/khai_thac` — Khai thác mỗi giờ.\n"
             "`/nhiem_vu` — Nhận thưởng mỗi 6 giờ.\n"
@@ -759,7 +827,7 @@ async def main():
     init_db()
 
     async with bot:
-        await bot.start("DISCORD_TOKEN")
+        await bot.start(TOKEN)
 
 
 if __name__ == "__main__":
