@@ -57,6 +57,16 @@ def get_role_bet_bonus(member, bet: int):
             return bet * percent // 100, percent, role_name
     return 0, 0, None
 
+
+def tinh_tien_tra_ve_blackjack(cuoc: int, ket_qua: str, thuong_role: int = 0) -> int:
+    """Return stake plus winnings, the stake on a push, or zero on a loss."""
+    if ket_qua == "win":
+        return cuoc * 2 + thuong_role
+    if ket_qua == "push":
+        return cuoc
+    return 0
+
+
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -316,7 +326,7 @@ async def xu_ly_nhan_thuong(
     await interaction.response.send_message(
         f"🎉 Bạn nhận được **{value:,} {CURRENCY_NAME}** "
         f"từ **{settings['name']}**!\n"
-        f"💎 Số dư hiện tại: **{balance:,} {CURRENCY_NAME}**."
+        f"💎 Bảo khố hiện tại: **{balance:,} {CURRENCY_NAME}**."
     )
 
 
@@ -446,7 +456,7 @@ class BlackjackView(View):
         for child in self.children:
             child.disabled = True
 
-    async def ket_thuc(self, interaction, ket_qua, tien_hoan=0):
+    async def ket_thuc(self, interaction, ket_qua, tien_tra_ve=0):
         if self.finished_game:
             if not interaction.response.is_done():
                 await interaction.response.send_message(
@@ -459,15 +469,15 @@ class BlackjackView(View):
         self.stop()
         self.khoa_nut()
 
-        if tien_hoan:
-            balance = update_balance(self.user.id, tien_hoan)
+        if tien_tra_ve > 0:
+            balance = update_balance(self.user.id, tien_tra_ve)
             ket_qua += (
-                f"\n💰 Đã trả về ví **+{tien_hoan:,} {CURRENCY_NAME}** "
+                f"\n💰 Đã chuyển vào ngân khố **+{tien_tra_ve:,} {CURRENCY_NAME}** "
                 "(gồm cược được hoàn và tiền thắng nếu có)."
             )
         else:
             balance = get_balance(self.user.id)
-        ket_qua += f"\n💎 Số dư: **{balance:,} {CURRENCY_NAME}**."
+        ket_qua += f"\n💎 Bảo khố: **{balance:,} {CURRENCY_NAME}**."
 
         await interaction.response.edit_message(
             embed=self.tao_embed(True, ket_qua),
@@ -482,14 +492,15 @@ class BlackjackView(View):
         self.khoa_nut()
 
         # Hoan cuoc neu nguoi choi bo ngang van
-        update_balance(self.user.id, self.bet)
+        balance = update_balance(self.user.id, self.bet)
 
         if self.message:
             balance = get_balance(self.user.id)
             result = (
                 "⏰ Hết 120 giây thao tác. "
-                "Ván chơi kết thúc và cược đã được hoàn lại.\n"
-                f"💎 Số dư: **{balance:,} {CURRENCY_NAME}**."
+                f"Ván chơi kết thúc; cược **+{self.bet:,} {CURRENCY_NAME}** "
+                "đã được hoàn về ngân khố.\n"
+                f"💎 Bảo khố: **{balance:,} {CURRENCY_NAME}**."
             )
             try:
                 await self.message.edit(
@@ -514,7 +525,7 @@ class BlackjackView(View):
             update_balance(self.user.id, self.bet)
             result = (
                 "🤝 Cả hai đều có Blackjack. Cược được hoàn lại. "
-                f"Đã cộng lại **+{self.bet:,} {CURRENCY_NAME}** vào ví."
+                f"Đã chuyển **+{self.bet:,} {CURRENCY_NAME}** vào ngân khố."
             )
 
         elif player_natural:
@@ -525,7 +536,7 @@ class BlackjackView(View):
             result = (
                 "🌟 Trời Độ - Bạn May Mắn Rút Được Thẻ SSR Siêu Hiếm. "
                 "Nhà Cái Liền Gục Ngã Trước Năm Triệu Điểm Sức Mạnh Của Bạn.\n"
-                f"Đã trả về ví **+{self.bet + total_profit:,} {CURRENCY_NAME}** "
+                f"Đã chuyển vào ngân khố **+{self.bet + total_profit:,} {CURRENCY_NAME}** "
                 f"(gồm cược **{self.bet:,}** và lãi "
                 f"**{total_profit:,} {CURRENCY_NAME}**)."
             )
@@ -542,7 +553,7 @@ class BlackjackView(View):
             )
 
         balance = get_balance(self.user.id)
-        result += f"\n💎 Số dư: **{balance:,} {CURRENCY_NAME}**."
+        result += f"\n💎 Bảo khố: **{balance:,} {CURRENCY_NAME}**."
 
         if self.message:
             await self.message.edit(
@@ -603,7 +614,7 @@ class BlackjackView(View):
                 f"Nhận Về **{self.bet + self.role_bonus:,} {CURRENCY_NAME}** "
                 "làm phần thưởng."
             )
-            refund = self.bet * 2 + self.role_bonus
+            payout = tinh_tien_tra_ve_blackjack(self.bet, "win", self.role_bonus)
 
         elif player_score > dealer_score:
             result = (
@@ -611,30 +622,30 @@ class BlackjackView(View):
                 f"Nhận Về **{self.bet + self.role_bonus:,} {CURRENCY_NAME}** "
                 "làm phần thưởng."
             )
-            refund = self.bet * 2 + self.role_bonus
+            payout = tinh_tien_tra_ve_blackjack(self.bet, "win", self.role_bonus)
 
         elif player_score < dealer_score:
             result = (
                 f"😔 Bạn thua ({player_score} - {dealer_score}) "
                 f"và mất **{self.bet:,} {CURRENCY_NAME}**."
             )
-            refund = 0
+            payout = tinh_tien_tra_ve_blackjack(self.bet, "loss", self.role_bonus)
 
         else:
             result = (
                 f"🤝 Hai bên hòa ({player_score} điểm). "
-                "Cược được hoàn lại."
+                f"Cược **{self.bet:,} {CURRENCY_NAME}** được hoàn về ngân khố."
             )
-            refund = self.bet
+            payout = tinh_tien_tra_ve_blackjack(self.bet, "push", self.role_bonus)
 
-        if self.role_bonus and refund > self.bet:
+        if self.role_bonus and payout > self.bet:
             result += (
                 f"\n✨ Thưởng **{self.role_bonus:,} {CURRENCY_NAME}** "
                 f"từ role **{self.role_bonus_name}** "
                 f"(+{self.role_bonus_percent}% tiền cược)."
             )
 
-        await self.ket_thuc(interaction, result, refund)
+        await self.ket_thuc(interaction, result, tien_tra_ve=payout)
 
 
 # =========================================================
@@ -654,7 +665,7 @@ async def blackjack(
         balance = get_balance(interaction.user.id)
         await interaction.response.send_message(
             f"❌ Bạn không đủ Linh Thạch để cược **{cuoc:,}**.\n"
-            f"Số dư hiện tại: **{balance:,} {CURRENCY_NAME}**.",
+            f"Bảo khố hiện tại: **{balance:,} {CURRENCY_NAME}**.",
             ephemeral=True
         )
         return
@@ -672,12 +683,12 @@ async def blackjack(
 
 @bot.tree.command(
     name="balance",
-    description="Xem số dư Linh Thạch"
+    description="Xem Bảo khố Linh Thạch"
 )
 async def balance(interaction: discord.Interaction):
     amount = get_balance(interaction.user.id)
     await interaction.response.send_message(
-        f"💎 Bạn đang có **{amount:,} {CURRENCY_NAME}**."
+        f"💎 Bảo khố của bạn hiện có **{amount:,} {CURRENCY_NAME}**."
     )
 
 
@@ -788,7 +799,7 @@ async def mua_role(
         balance_now = get_balance(member.id)
         await interaction.response.send_message(
             f"❌ Bạn không đủ Linh Thạch để mua **{role_name}** "
-            f"(giá **{price:,}**). Số dư: **{balance_now:,}**.",
+            f"(giá **{price:,}**). Bảo khố: **{balance_now:,}**.",
             ephemeral=True
         )
         return
@@ -811,7 +822,7 @@ async def mua_role(
 
 @bot.tree.command(
     name="leaderboard",
-    description="Xem bảng xếp hạng người chơi theo số dư Linh Thạch"
+    description="Xem bảng xếp hạng người chơi theo Bảo khố Linh Thạch"
 )
 async def leaderboard(interaction: discord.Interaction):
     rows, total = get_leaderboard(10)
@@ -843,7 +854,7 @@ async def leaderboard(interaction: discord.Interaction):
         description=description,
         color=0xF1C40F
     )
-    embed.set_footer(text="Xếp hạng toàn bộ người chơi của bot theo số dư hiện tại.")
+    embed.set_footer(text="Xếp hạng toàn bộ người chơi của bot theo Bảo khố hiện tại.")
     await interaction.response.send_message(embed=embed)
 
 
@@ -857,7 +868,7 @@ async def bang_chuc_nang(interaction: discord.Interaction):
         description=(
             "`/blackjack cuoc` — Chơi Blackjack.\n"
             "Sở hữu role shop sẽ tăng tiền lãi Blackjack khi thắng (chỉ áp dụng role bậc cao nhất).\n"
-            "`/balance` — Xem số dư.\n"
+            "`/balance` — Xem Bảo khố.\n"
             "`/leaderboard` — Xem top người chơi và hạng của bạn.\n"
             "`/shop` — Xem role tu luyện và giá.\n"
             "`/mua_role` — Mua role kế tiếp bằng Linh Thạch.\n"
@@ -866,7 +877,7 @@ async def bang_chuc_nang(interaction: discord.Interaction):
             "`/nhiem_vu` — Nhận thưởng mỗi 6 giờ.\n"
             "Nhắn tin hợp lệ — Có cơ hội nhận thưởng mỗi 60 giây.\n"
             "`/admin pay` — Cộng Linh Thạch.\n"
-            "`/admin setbalance` — Đặt số dư.\n"
+            "`/admin setbalance` — Đặt Bảo khố.\n"
             "`/admin take` — Trừ Linh Thạch."
         ),
         color=0x9B59B6
@@ -963,17 +974,17 @@ async def admin_pay(
     await interaction.response.send_message(
         f"✅ Đã cộng **{so_luong:,} {CURRENCY_NAME}** cho "
         f"{nguoi_choi.mention}.\n"
-        f"Số dư mới: **{balance:,} {CURRENCY_NAME}**."
+        f"Bảo khố mới: **{balance:,} {CURRENCY_NAME}**."
     )
 
 
 @admin_group.command(
     name="setbalance",
-    description="Đặt số dư Linh Thạch"
+    description="Đặt Bảo khố Linh Thạch"
 )
 @app_commands.describe(
-    nguoi_choi="Người cần chỉnh số dư",
-    so_luong="Số dư mới"
+    nguoi_choi="Người cần chỉnh Bảo khố",
+    so_luong="Mức Bảo khố mới"
 )
 async def admin_setbalance(
     interaction: discord.Interaction,
@@ -989,7 +1000,7 @@ async def admin_setbalance(
 
     balance = set_balance(nguoi_choi.id, so_luong)
     await interaction.response.send_message(
-        f"✅ Số dư của {nguoi_choi.mention} hiện là "
+        f"✅ Bảo khố của {nguoi_choi.mention} hiện là "
         f"**{balance:,} {CURRENCY_NAME}**."
     )
 
@@ -1018,7 +1029,7 @@ async def admin_take(
     await interaction.response.send_message(
         f"✅ Đã trừ **{so_luong:,} {CURRENCY_NAME}** của "
         f"{nguoi_choi.mention}.\n"
-        f"Số dư mới: **{balance:,} {CURRENCY_NAME}**."
+        f"Bảo khố mới: **{balance:,} {CURRENCY_NAME}**."
     )
 
 
