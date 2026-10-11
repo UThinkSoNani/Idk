@@ -71,6 +71,8 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+RED_ENVELOPE_RECOVERY_DONE = False
+RED_ENVELOPE_EXPIRY_TASKS = set()
 
 
 # =========================================================
@@ -92,6 +94,31 @@ def init_db():
                 reward_type TEXT NOT NULL,
                 last_claim REAL NOT NULL,
                 PRIMARY KEY (user_id, reward_type)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS red_envelopes (
+                envelope_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                creator_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER,
+                total_amount INTEGER NOT NULL,
+                remaining_amount INTEGER NOT NULL,
+                total_slots INTEGER NOT NULL,
+                remaining_slots INTEGER NOT NULL,
+                expires_at REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS red_envelope_claims (
+                envelope_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                claimed_at REAL NOT NULL,
+                PRIMARY KEY (envelope_id, user_id)
             )
         """)
         conn.commit()
@@ -247,6 +274,190 @@ def transfer_balance(sender_id: int, recipient_id: int, amount: int):
         ).fetchone()[0]
         conn.commit()
         return int(sender_balance), int(recipient_balance)
+
+
+def create_red_envelope(creator_id: int, guild_id: int, channel_id: int,
+                        total_amount: int, slots: int, expires_at: float):
+    """Escrow a red-envelope pool and create its persistent record atomically."""
+    if total_amount < slots or slots < 1:
+        return None
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, ?)",
+            (creator_id, STARTING_BALANCE)
+        )
+        cursor = conn.execute(
+            "UPDATE users SET balance = balance - ? "
+            "WHERE user_id = ? AND balance >= ?",
+            (total_amount, creator_id, total_amount)
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return None
+        cursor = conn.execute("""
+            INSERT INTO red_envelopes (
+                creator_id, guild_id, channel_id, total_amount,
+                remaining_amount, total_slots, remaining_slots,
+                expires_at, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+        """, (creator_id, guild_id, channel_id, total_amount, total_amount,
+              slots, slots, expires_at, time.time()))
+        envelope_id = int(cursor.lastrowid)
+        new_balance = conn.execute(
+            "SELECT balance FROM users WHERE user_id = ?", (creator_id,)
+        ).fetchone()[0]
+        conn.commit()
+        return envelope_id, int(new_balance)
+
+
+def set_red_envelope_message(envelope_id: int, message_id: int):
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.execute(
+            "UPDATE red_envelopes SET message_id = ? WHERE envelope_id = ?",
+            (message_id, envelope_id)
+        )
+        conn.commit()
+
+
+def get_red_envelope(envelope_id: int):
+    with sqlite3.connect(DB_FILE) as conn:
+        row = conn.execute("""
+            SELECT envelope_id, creator_id, guild_id, channel_id, message_id,
+                   total_amount, remaining_amount, total_slots, remaining_slots,
+                   expires_at, status
+            FROM red_envelopes WHERE envelope_id = ?
+        """, (envelope_id,)).fetchone()
+        if row is None:
+            return None
+        state = dict(zip((
+            "envelope_id", "creator_id", "guild_id", "channel_id", "message_id",
+            "total_amount", "remaining_amount", "total_slots", "remaining_slots",
+            "expires_at", "status"
+        ), row))
+        state["claimed_count"] = conn.execute(
+            "SELECT COUNT(*) FROM red_envelope_claims WHERE envelope_id = ?",
+            (envelope_id,)
+        ).fetchone()[0]
+        return state
+
+
+def claim_red_envelope(envelope_id: int, guild_id: int, user_id: int):
+    """Atomically award one random share; each server member can claim once."""
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("""
+            SELECT creator_id, guild_id, remaining_amount, remaining_slots,
+                   expires_at, status
+            FROM red_envelopes WHERE envelope_id = ?
+        """, (envelope_id,)).fetchone()
+        if row is None:
+            conn.rollback()
+            return "missing", 0
+        creator_id, envelope_guild, remaining, slots, expires_at, status = row
+        if envelope_guild != guild_id:
+            conn.rollback()
+            return "wrong_server", 0
+        if status != "active":
+            conn.rollback()
+            return "closed", 0
+        if time.time() >= expires_at:
+            if remaining:
+                conn.execute(
+                    "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+                    (remaining, creator_id)
+                )
+            conn.execute("""
+                UPDATE red_envelopes
+                SET status = 'expired', remaining_amount = 0, remaining_slots = 0
+                WHERE envelope_id = ? AND status = 'active'
+            """, (envelope_id,))
+            conn.commit()
+            return "expired", int(remaining)
+        already_claimed = conn.execute(
+            "SELECT 1 FROM red_envelope_claims WHERE envelope_id = ? AND user_id = ?",
+            (envelope_id, user_id)
+        ).fetchone()
+        if already_claimed:
+            conn.rollback()
+            return "duplicate", 0
+        if slots <= 0 or remaining <= 0:
+            conn.rollback()
+            return "closed", 0
+
+        amount = remaining if slots == 1 else random.randint(1, remaining - slots + 1)
+        conn.execute(
+            "INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, ?)",
+            (user_id, STARTING_BALANCE)
+        )
+        conn.execute(
+            "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+            (amount, user_id)
+        )
+        conn.execute("""
+            INSERT INTO red_envelope_claims (envelope_id, user_id, amount, claimed_at)
+            VALUES (?, ?, ?, ?)
+        """, (envelope_id, user_id, amount, time.time()))
+        new_remaining = remaining - amount
+        new_slots = slots - 1
+        new_status = "completed" if new_slots == 0 else "active"
+        conn.execute("""
+            UPDATE red_envelopes
+            SET remaining_amount = ?, remaining_slots = ?, status = ?
+            WHERE envelope_id = ? AND status = 'active'
+        """, (new_remaining, new_slots, new_status, envelope_id))
+        conn.commit()
+        return "claimed", int(amount)
+
+
+def expire_red_envelope(envelope_id: int):
+    """Close an active envelope and return its unclaimed balance to its creator."""
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT creator_id, remaining_amount FROM red_envelopes "
+            "WHERE envelope_id = ? AND status = 'active'",
+            (envelope_id,)
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return 0
+        creator_id, remaining = row
+        if remaining:
+            conn.execute(
+                "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+                (remaining, creator_id)
+            )
+        conn.execute("""
+            UPDATE red_envelopes
+            SET status = 'expired', remaining_amount = 0, remaining_slots = 0
+            WHERE envelope_id = ? AND status = 'active'
+        """, (envelope_id,))
+        conn.commit()
+        return int(remaining)
+
+
+def refund_open_red_envelopes_after_restart():
+    """Refund all active escrows after a process restart and mark them cancelled."""
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute("""
+            SELECT envelope_id, creator_id, channel_id, message_id, remaining_amount
+            FROM red_envelopes WHERE status = 'active'
+        """).fetchall()
+        for envelope_id, creator_id, _channel_id, _message_id, remaining in rows:
+            if remaining:
+                conn.execute(
+                    "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+                    (remaining, creator_id)
+                )
+            conn.execute("""
+                UPDATE red_envelopes
+                SET status = 'cancelled', remaining_amount = 0, remaining_slots = 0
+                WHERE envelope_id = ?
+            """, (envelope_id,))
+        conn.commit()
+        return rows
 
 
 # =========================================================
@@ -686,6 +897,140 @@ class BlackjackView(View):
         await self.ket_thuc(interaction, result, tien_tra_ve=payout)
 
 
+class RedEnvelopeView(View):
+    def __init__(self, envelope_id: int, timeout: int = 600):
+        super().__init__(timeout=timeout)
+        self.envelope_id = envelope_id
+        self.message = None
+
+    def schedule_expiry(self, expires_at: float):
+        task = asyncio.create_task(self.expire_at_deadline(expires_at))
+        RED_ENVELOPE_EXPIRY_TASKS.add(task)
+        task.add_done_callback(RED_ENVELOPE_EXPIRY_TASKS.discard)
+
+    async def expire_at_deadline(self, expires_at: float):
+        await asyncio.sleep(max(0, expires_at - time.time()))
+        await self.close_and_refund()
+
+    async def close_and_refund(self):
+        state = get_red_envelope(self.envelope_id)
+        if state is None or state["status"] != "active":
+            self.khoa_nut()
+            self.stop()
+            return
+        refunded = expire_red_envelope(self.envelope_id)
+        state = get_red_envelope(self.envelope_id)
+        self.khoa_nut()
+        self.stop()
+        if self.message and state:
+            try:
+                await self.message.edit(
+                    embed=self.tao_embed(state, refunded=refunded),
+                    view=self
+                )
+            except discord.HTTPException:
+                pass
+
+    def tao_embed(self, state=None, refunded: int = 0):
+        state = state or get_red_envelope(self.envelope_id)
+        if state is None:
+            return discord.Embed(title="🧧 Bao lì xì không còn tồn tại")
+
+        status_text = {
+            "active": f"Đang mở — kết thúc <t:{int(state['expires_at'])}:R>",
+            "completed": "Đã phát hết các suất lì xì.",
+            "expired": f"Đã hết hạn; **{refunded:,} {CURRENCY_NAME}** còn lại đã về ngân khố người phát.",
+            "cancelled": "Đã đóng do bot khởi động lại; phần quà chưa nhận đã được hoàn.",
+        }.get(state["status"], "Đã đóng.")
+        embed = discord.Embed(
+            title="🧧 Bao lì xì Linh Thạch",
+            description=(
+                f"<@{state['creator_id']}> phát **{state['total_amount']:,} {CURRENCY_NAME}** "
+                f"cho **{state['total_slots']} người**.\n{status_text}"
+            ),
+            color=0xE74C3C if state["status"] == "active" else 0x95A5A6
+        )
+        embed.add_field(
+            name="Quỹ còn lại",
+            value=f"**{state['remaining_amount']:,} {CURRENCY_NAME}**",
+            inline=True
+        )
+        embed.add_field(
+            name="Suất còn lại",
+            value=f"**{state['remaining_slots']} / {state['total_slots']}**",
+            inline=True
+        )
+        embed.add_field(
+            name="Đã nhận",
+            value=f"**{state['claimed_count']} người**",
+            inline=True
+        )
+        embed.set_footer(text="Mỗi người nhận một lần; phần chia ngẫu nhiên, tối thiểu 1 Linh Thạch.")
+        return embed
+
+    def khoa_nut(self):
+        for child in self.children:
+            child.disabled = True
+
+    async def on_timeout(self):
+        await self.close_and_refund()
+
+    @button(label="Nhận lì xì", style=discord.ButtonStyle.success, emoji="🧧")
+    async def claim(self, interaction: discord.Interaction, btn: discord.ui.Button):
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "❌ Chỉ có thể nhận lì xì trong server này.", ephemeral=True
+            )
+            return
+        if interaction.user.bot:
+            await interaction.response.send_message(
+                "❌ Bot không thể nhận lì xì.", ephemeral=True
+            )
+            return
+
+        status, amount = claim_red_envelope(
+            self.envelope_id, interaction.guild_id, interaction.user.id
+        )
+        if status == "claimed":
+            await interaction.response.send_message(
+                f"🧧 Bạn nhận được **{amount:,} {CURRENCY_NAME}** từ bao lì xì!",
+                ephemeral=True
+            )
+            state = get_red_envelope(self.envelope_id)
+            if state and state["status"] != "active":
+                self.khoa_nut()
+                self.stop()
+            if state and interaction.message:
+                try:
+                    await interaction.message.edit(embed=self.tao_embed(state), view=self)
+                except discord.HTTPException:
+                    pass
+            return
+
+        messages = {
+            "missing": "❌ Bao lì xì không tồn tại.",
+            "wrong_server": "❌ Bao lì xì này thuộc server khác.",
+            "duplicate": "🎁 Bạn đã nhận lì xì này rồi.",
+            "closed": "⏰ Bao lì xì đã đóng hoặc đã phát hết.",
+            "expired": f"⏰ Bao lì xì đã hết hạn; **{amount:,} {CURRENCY_NAME}** còn lại đã được trả cho người phát.",
+        }
+        await interaction.response.send_message(
+            messages.get(status, "❌ Không thể nhận bao lì xì này."),
+            ephemeral=True
+        )
+        if status == "expired":
+            self.khoa_nut()
+            self.stop()
+            state = get_red_envelope(self.envelope_id)
+            if state and interaction.message:
+                try:
+                    await interaction.message.edit(
+                        embed=self.tao_embed(state, refunded=amount), view=self
+                    )
+                except discord.HTTPException:
+                    pass
+
+
 # =========================================================
 # 6. LENH SLASH CO BAN
 # =========================================================
@@ -728,6 +1073,74 @@ async def balance(interaction: discord.Interaction):
     await interaction.response.send_message(
         f"💎 Bảo khố của bạn hiện có **{amount:,} {CURRENCY_NAME}**."
     )
+
+
+@bot.tree.command(
+    name="phat_bao_li_xi",
+    description="Phát bao lì xì ngẫu nhiên cho người chơi trong server"
+)
+@app_commands.describe(
+    tong_tien="Tổng quỹ Linh Thạch sẽ phát",
+    so_suat="Số người tối đa được nhận (từ 1 đến 100)"
+)
+async def phat_bao_li_xi(
+    interaction: discord.Interaction,
+    tong_tien: app_commands.Range[int, 1, 1_000_000_000],
+    so_suat: app_commands.Range[int, 1, 100]
+):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "❌ Lệnh phát bao lì xì chỉ dùng được trong server.",
+            ephemeral=True
+        )
+        return
+    if tong_tien < so_suat:
+        await interaction.response.send_message(
+            "❌ Tổng quỹ phải ít nhất bằng số suất để mỗi người nhận được "
+            "tối thiểu 1 Linh Thạch.",
+            ephemeral=True
+        )
+        return
+
+    expires_at = time.time() + 10 * 60
+    created = create_red_envelope(
+        interaction.user.id,
+        interaction.guild.id,
+        interaction.channel_id,
+        tong_tien,
+        so_suat,
+        expires_at
+    )
+    if created is None:
+        bao_kho = get_balance(interaction.user.id)
+        await interaction.response.send_message(
+            f"❌ Bảo khố không đủ để phát **{tong_tien:,} {CURRENCY_NAME}**. "
+            f"Bảo khố hiện tại: **{bao_kho:,} {CURRENCY_NAME}**.",
+            ephemeral=True
+        )
+        return
+
+    envelope_id, _remaining_balance = created
+    view = RedEnvelopeView(envelope_id)
+    embed = view.tao_embed()
+    content = (
+        f"🧧 {interaction.user.mention} phát bao lì xì **{tong_tien:,} "
+        f"{CURRENCY_NAME}** cho tối đa **{so_suat} người**! "
+        "Bấm nút bên dưới để nhận ngẫu nhiên — mỗi người nhận một lần. "
+        "Bao lì xì hết hạn sau 10 phút."
+    )
+    try:
+        await interaction.response.send_message(content=content, embed=embed, view=view)
+    except discord.HTTPException:
+        expire_red_envelope(envelope_id)
+        return
+
+    view.schedule_expiry(expires_at)
+    try:
+        view.message = await interaction.original_response()
+        set_red_envelope_message(envelope_id, view.message.id)
+    except discord.HTTPException as error:
+        print(f"Không lưu được message bao lì xì {envelope_id}: {error}")
 
 
 @bot.tree.command(
@@ -958,6 +1371,7 @@ async def bang_chuc_nang(interaction: discord.Interaction):
             "Sở hữu role shop sẽ tăng tiền lãi Blackjack khi thắng (chỉ áp dụng role bậc cao nhất).\n"
             "`/balance` — Xem Bảo khố.\n"
             "`/chuyen_linh_thach nguoi_nhan so_luong` — Tặng Linh Thạch cho người chơi trong server.\n"
+            "`/phat_bao_li_xi tong_tien so_suat` — Phát bao lì xì ngẫu nhiên, hạn 10 phút.\n"
             "`/leaderboard` — Xem top người chơi và hạng của bạn.\n"
             "`/shop` — Xem role tu luyện và giá.\n"
             "`/mua_role` — Mua role kế tiếp bằng Linh Thạch.\n"
@@ -1150,7 +1564,30 @@ async def start_health_server():
 
 @bot.event
 async def on_ready():
+    global RED_ENVELOPE_RECOVERY_DONE
     print(f"Bot đã đăng nhập: {bot.user}")
+
+    if not RED_ENVELOPE_RECOVERY_DONE:
+        RED_ENVELOPE_RECOVERY_DONE = True
+        recovered = refund_open_red_envelopes_after_restart()
+        for envelope_id, _creator_id, channel_id, message_id, refunded in recovered:
+            if not message_id:
+                continue
+            try:
+                channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+                message = await channel.fetch_message(message_id)
+                view = RedEnvelopeView(envelope_id)
+                await message.edit(
+                    content=(
+                        "🧧 Bao lì xì đã đóng do bot khởi động lại. "
+                        f"Phần chưa nhận **{refunded:,} {CURRENCY_NAME}** "
+                        "đã được hoàn về ngân khố người phát."
+                    ),
+                    embed=view.tao_embed(),
+                    view=None
+                )
+            except discord.HTTPException as error:
+                print(f"Không cập nhật được bao lì xì {envelope_id} sau restart: {error}")
 
     try:
         synced = await bot.tree.sync()
