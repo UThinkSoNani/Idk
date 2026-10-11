@@ -759,7 +759,7 @@ async def main():
     init_db()
 
     async with bot:
-        await bot.start("MTU1ODI0NDIxMDMzNzkxMDgxNA.GyVAzq.x8ApKJKIV2pHtEPfIybwuZWRnfCTUtSeeVd8Tk")
+        await bot.start("DISCORD_TOKEN")
 
 
 if __name__ == "__main__":
