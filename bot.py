@@ -25,6 +25,17 @@ STARTING_BALANCE = 1000
 MIN_BET = 10
 MAX_BET = 100000
 
+ROLE_SHOP = [
+    ("Luyện Khí Kỳ", 10),
+    ("Trúc Cơ Kỳ", 10_000),
+    ("Kết Đan Kỳ", 30_000),
+    ("Nguyên Anh Kỳ", 50_000),
+    ("Hóa Thần Kỳ", 100_000),
+    ("Luyện Hư", 500_000),
+    ("Hợp Thể", 1_000_000),
+    ("Đại Thừa", 5_000_000),
+]
+
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -143,6 +154,29 @@ def place_bet(user_id: int, amount: int) -> bool:
         """, (amount, user_id, amount))
         conn.commit()
         return cursor.rowcount == 1
+
+
+def spend_balance(user_id: int, amount: int):
+    """Atomically deduct a purchase; return remaining balance or None."""
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, ?)",
+            (user_id, STARTING_BALANCE)
+        )
+        cursor = conn.execute(
+            "UPDATE users SET balance = balance - ? "
+            "WHERE user_id = ? AND balance >= ?",
+            (amount, user_id, amount)
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return None
+        balance = conn.execute(
+            "SELECT balance FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()[0]
+        conn.commit()
+        return int(balance)
 
 
 # =========================================================
@@ -590,6 +624,135 @@ async def balance(interaction: discord.Interaction):
 
 
 @bot.tree.command(
+    name="shop",
+    description="Xem các role tu luyện và giá bằng Linh Thạch"
+)
+async def shop(interaction: discord.Interaction):
+    lines = []
+    for index, (role_name, price) in enumerate(ROLE_SHOP):
+        prerequisite = (
+            f" — cần role **{ROLE_SHOP[index - 1][0]}**"
+            if index > 0 else " — chưa cần role trước"
+        )
+        lines.append(f"**{role_name}** — {price:,} {CURRENCY_NAME}{prerequisite}")
+
+    embed = discord.Embed(
+        title="🛒 Shop role tu luyện",
+        description=(
+            "Dùng `/mua_role` để mua role. Các bậc phải mua lần lượt; "
+            "role đã có sẽ không bị gỡ khi thăng cấp.\n\n"
+            + "\n".join(lines)
+        ),
+        color=0x9B59B6
+    )
+    embed.set_footer(text="Role cần được tạo sẵn trong server để bot có thể cấp.")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(
+    name="mua_role",
+    description="Dùng Linh Thạch mua role tu luyện tiếp theo"
+)
+@app_commands.describe(role="Chọn role muốn mua trong shop")
+@app_commands.choices(role=[
+    app_commands.Choice(name=f"{role_name} — {price:,} Linh Thạch", value=role_name)
+    for role_name, price in ROLE_SHOP
+])
+async def mua_role(
+    interaction: discord.Interaction,
+    role: app_commands.Choice[str]
+):
+    if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(
+            "❌ Lệnh mua role chỉ dùng được trong server.", ephemeral=True
+        )
+        return
+
+    member = interaction.user
+    index = next(i for i, item in enumerate(ROLE_SHOP) if item[0] == role.value)
+    role_name, price = ROLE_SHOP[index]
+    target_role = discord.utils.get(interaction.guild.roles, name=role_name)
+
+    if target_role is None:
+        await interaction.response.send_message(
+            f"❌ Server chưa có role **{role_name}**. Hãy nhờ quản trị viên "
+            "tạo role này trước.", ephemeral=True
+        )
+        return
+    if target_role in member.roles:
+        await interaction.response.send_message(
+            f"✅ Bạn đã có role **{role_name}** rồi.", ephemeral=True
+        )
+        return
+
+    higher_owned = [name for name, _ in ROLE_SHOP[index + 1:]
+                    if discord.utils.get(interaction.guild.roles, name=name)
+                    in member.roles]
+    if higher_owned:
+        await interaction.response.send_message(
+            "❌ Bạn đã sở hữu role bậc cao hơn nên không thể mua lại role thấp hơn.",
+            ephemeral=True
+        )
+        return
+
+    if index > 0:
+        prerequisite_name = ROLE_SHOP[index - 1][0]
+        prerequisite_role = discord.utils.get(
+            interaction.guild.roles, name=prerequisite_name
+        )
+        if prerequisite_role is None:
+            await interaction.response.send_message(
+                f"❌ Server chưa có role tiền đề **{prerequisite_name}**. "
+                "Hãy nhờ quản trị viên tạo role này trước.", ephemeral=True
+            )
+            return
+        if prerequisite_role not in member.roles:
+            await interaction.response.send_message(
+                f"🔒 Để mua **{role_name}**, bạn cần có role "
+                f"**{prerequisite_name}** trước.", ephemeral=True
+            )
+            return
+
+    if not interaction.guild.me or not interaction.guild.me.guild_permissions.manage_roles:
+        await interaction.response.send_message(
+            "❌ Bot cần quyền **Manage Roles** để cấp role.", ephemeral=True
+        )
+        return
+    if not target_role.is_assignable():
+        await interaction.response.send_message(
+            f"❌ Bot không thể cấp role **{role_name}**. Hãy kiểm tra role "
+            "có nằm dưới role cao nhất của bot hay không.", ephemeral=True
+        )
+        return
+
+    remaining = spend_balance(member.id, price)
+    if remaining is None:
+        balance_now = get_balance(member.id)
+        await interaction.response.send_message(
+            f"❌ Bạn không đủ Linh Thạch để mua **{role_name}** "
+            f"(giá **{price:,}**). Số dư: **{balance_now:,}**.",
+            ephemeral=True
+        )
+        return
+
+    try:
+        await member.add_roles(target_role, reason=f"Mua role shop: {role_name}")
+    except (discord.Forbidden, discord.HTTPException) as error:
+        update_balance(member.id, price)
+        print(f"Không cấp được role {role_name} cho {member.id}; đã hoàn tiền: {error}")
+        await interaction.response.send_message(
+            "❌ Bot cấp role không thành công; Linh Thạch đã được hoàn lại. "
+            "Hãy thử lại hoặc liên hệ quản trị viên.", ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"🎉 Bạn đã mua role **{role_name}** với giá **{price:,} "
+        f"{CURRENCY_NAME}**. Số dư còn lại: **{remaining:,} {CURRENCY_NAME}**."
+    )
+
+
+@bot.tree.command(
     name="leaderboard",
     description="Xem bảng xếp hạng người chơi theo số dư Linh Thạch"
 )
@@ -638,6 +801,8 @@ async def bang_chuc_nang(interaction: discord.Interaction):
             "`/blackjack cuoc` — Chơi Blackjack.\n"
             "`/balance` — Xem số dư.\n"
             "`/leaderboard` — Xem top người chơi và hạng của bạn.\n"
+            "`/shop` — Xem role tu luyện và giá.\n"
+            "`/mua_role` — Mua role kế tiếp bằng Linh Thạch.\n"
             "`/diem_danh` — Điểm danh mỗi 24 giờ.\n"
             "`/khai_thac` — Khai thác mỗi giờ.\n"
             "`/nhiem_vu` — Nhận thưởng mỗi 6 giờ.\n"
