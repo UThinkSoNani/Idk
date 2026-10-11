@@ -18,7 +18,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TOKEN = os.getenv("DISCORD_TOKEN")
+def normalize_discord_token(token: str | None) -> str:
+    """Normalize a pasted Discord bot token without logging its value."""
+    token = (token or "").strip()
+    if token.lower().startswith("bot "):
+        token = token[4:].strip()
+    return token
+
+
+TOKEN = normalize_discord_token(os.getenv("DISCORD_TOKEN"))
 DB_FILE = "linh_thach.db"
 CURRENCY_NAME = "Linh Thạch"
 
@@ -1015,6 +1023,20 @@ async def main():
     try:
         async with bot:
             await bot.start(TOKEN)
+    except discord.LoginFailure as error:
+        raise RuntimeError(
+            "Discord từ chối DISCORD_TOKEN. Hãy tạo lại Bot Token trong "
+            "Discord Developer Portal, cập nhật secret DISCORD_TOKEN trên "
+            "nền tảng deploy rồi khởi động lại bot. Không gửi token cho ai."
+        ) from error
+    except discord.HTTPException as error:
+        if error.status == 401:
+            raise RuntimeError(
+                "Discord trả về HTTP 401: DISCORD_TOKEN không hợp lệ hoặc đã "
+                "bị thu hồi. Hãy thay bằng Bot Token mới trong secret của môi "
+                "trường deploy và khởi động lại bot. Không chia sẻ token."
+            ) from error
+        raise
     finally:
         await web_runner.cleanup()
 
