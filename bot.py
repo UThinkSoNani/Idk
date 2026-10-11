@@ -144,7 +144,8 @@ def set_balance(user_id: int, amount: int) -> int:
 
 
 def update_balance(user_id: int, amount: int) -> int:
-    with sqlite3.connect(DB_FILE) as conn:
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             "INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, ?)",
             (user_id, STARTING_BALANCE)
@@ -459,9 +460,13 @@ class BlackjackView(View):
         self.khoa_nut()
 
         if tien_hoan:
-            update_balance(self.user.id, tien_hoan)
-
-        balance = get_balance(self.user.id)
+            balance = update_balance(self.user.id, tien_hoan)
+            ket_qua += (
+                f"\n💰 Đã trả về ví **+{tien_hoan:,} {CURRENCY_NAME}** "
+                "(gồm cược được hoàn và tiền thắng nếu có)."
+            )
+        else:
+            balance = get_balance(self.user.id)
         ket_qua += f"\n💎 Số dư: **{balance:,} {CURRENCY_NAME}**."
 
         await interaction.response.edit_message(
@@ -507,7 +512,10 @@ class BlackjackView(View):
 
         if player_natural and dealer_natural:
             update_balance(self.user.id, self.bet)
-            result = "🤝 Cả hai đều có Blackjack. Cược được hoàn lại."
+            result = (
+                "🤝 Cả hai đều có Blackjack. Cược được hoàn lại. "
+                f"Đã cộng lại **+{self.bet:,} {CURRENCY_NAME}** vào ví."
+            )
 
         elif player_natural:
             # Tra lai cuoc va thuong lai 3:2
@@ -516,7 +524,9 @@ class BlackjackView(View):
             update_balance(self.user.id, self.bet + total_profit)
             result = (
                 "🎉 Blackjack tự nhiên! "
-                f"Bạn nhận lại cược và lãi **{total_profit:,} {CURRENCY_NAME}**."
+                f"Đã trả về ví **+{self.bet + total_profit:,} {CURRENCY_NAME}** "
+                f"(gồm cược **{self.bet:,}** và lãi "
+                f"**{total_profit:,} {CURRENCY_NAME}**)."
             )
             if self.role_bonus:
                 result += (
