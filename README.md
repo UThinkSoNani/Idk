@@ -17,6 +17,8 @@ If Discord returns `401 Unauthorized`, the bot token configured in the running e
 
 Players receive an additional profit bonus when they win Blackjack, calculated from the original wager: Luyện Khí Kỳ 1%, Trúc Cơ Kỳ 3%, Kết Đan Kỳ 5%, Nguyên Anh Kỳ 8%, Hóa Thần Kỳ 10%, Luyện Hư 12%, Hợp Thể 15%, and Đại Thừa 20%. Only the highest listed role the player currently has in the server is used. The bonus is rounded down to a whole Linh Thạch and does not apply to losses, ties, or refunded/abandoned games. Natural Blackjack wins also receive the bonus.
 
+For `/blackjack`, either enter a direct wager from 10 to 100,000 Linh Thạch, or choose one preset: **ALL** wagers the entire current Bảo khố, while **50% Bảo khố** wagers half rounded down to a whole Linh Thạch. Choose only one method per game; preset wagers must still meet the 10-Linh-Thạch minimum.
+
 ## Server red envelopes
 
 Use `/phat_bao_li_xi tong_tien so_suat` in a server channel to create a public, clickable red envelope. The total pool is reserved from the creator's Bảo khố; each member can claim once for a random whole-number share (at least 1 Linh Thạch per slot). Envelopes expire after 10 minutes, and any unclaimed amount is returned to the creator. Active envelopes are also refunded and closed if the bot restarts before they expire.

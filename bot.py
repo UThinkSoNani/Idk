@@ -1039,21 +1039,60 @@ class RedEnvelopeView(View):
     name="blackjack",
     description="Chơi Blackjack bằng Linh Thạch"
 )
-@app_commands.describe(cuoc="Số Linh Thạch muốn cược")
+@app_commands.describe(
+    cuoc="Nhập số Linh Thạch muốn cược (từ 10 đến 100.000)",
+    muc_cuoc="Chọn cược toàn bộ hoặc một nửa Bảo khố"
+)
+@app_commands.choices(muc_cuoc=[
+    app_commands.Choice(name="ALL — 100% Bảo khố", value="all"),
+    app_commands.Choice(name="50% Bảo khố", value="half")
+])
 async def blackjack(
     interaction: discord.Interaction,
-    cuoc: app_commands.Range[int, MIN_BET, MAX_BET]
+    cuoc: int | None = None,
+    muc_cuoc: app_commands.Choice[str] | None = None
 ):
-    if not place_bet(interaction.user.id, cuoc):
+    if (cuoc is None) == (muc_cuoc is None):
+        await interaction.response.send_message(
+            "❌ Hãy chọn đúng một cách cược: nhập `cuoc` hoặc chọn `muc_cuoc` "
+            "(ALL/50% Bảo khố).",
+            ephemeral=True
+        )
+        return
+
+    if cuoc is not None:
+        if not MIN_BET <= cuoc <= MAX_BET:
+            await interaction.response.send_message(
+                f"❌ Cược nhập trực tiếp phải từ **{MIN_BET:,}** đến "
+                f"**{MAX_BET:,} {CURRENCY_NAME}**.",
+                ephemeral=True
+            )
+            return
+        so_tien_cuoc = cuoc
+    else:
+        bao_kho = get_balance(interaction.user.id)
+        if muc_cuoc.value == "all":
+            so_tien_cuoc = bao_kho
+        else:
+            so_tien_cuoc = bao_kho // 2
+        if so_tien_cuoc < MIN_BET:
+            await interaction.response.send_message(
+                f"❌ Mức cược này chưa đạt tối thiểu **{MIN_BET:,} "
+                f"{CURRENCY_NAME}**. Bảo khố hiện tại: **{bao_kho:,}**.",
+                ephemeral=True
+            )
+            return
+
+    if not place_bet(interaction.user.id, so_tien_cuoc):
         balance = get_balance(interaction.user.id)
         await interaction.response.send_message(
-            f"❌ Bạn không đủ Linh Thạch để cược **{cuoc:,}**.\n"
+            f"❌ Bạn không đủ Linh Thạch để cược **{so_tien_cuoc:,}**.\n"
             f"Bảo khố hiện tại: **{balance:,} {CURRENCY_NAME}**.",
             ephemeral=True
         )
         return
 
-    view = BlackjackView(interaction.user, cuoc)
+    view = BlackjackView(interaction.user, so_tien_cuoc)
 
     await interaction.response.send_message(
         embed=view.tao_embed(),
@@ -1367,7 +1406,7 @@ async def bang_chuc_nang(interaction: discord.Interaction):
     embed = discord.Embed(
         title="📜 Bảng chức năng",
         description=(
-            "`/blackjack cuoc` — Chơi Blackjack.\n"
+            "`/blackjack` — Chơi Blackjack: nhập cược 10–100.000 hoặc chọn ALL/50% Bảo khố.\n"
             "Sở hữu role shop sẽ tăng tiền lãi Blackjack khi thắng (chỉ áp dụng role bậc cao nhất).\n"
             "`/balance` — Xem Bảo khố.\n"
             "`/chuyen_linh_thach nguoi_nhan so_luong` — Tặng Linh Thạch cho người chơi trong server.\n"
