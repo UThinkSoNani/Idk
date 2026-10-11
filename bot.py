@@ -5,6 +5,7 @@ import time
 import asyncio
 
 import discord
+from aiohttp import web
 from discord import app_commands
 from discord.ext import commands
 from discord.ui import View, button
@@ -971,6 +972,25 @@ bot.tree.add_command(admin_group)
 # 10. KHOI DONG BOT
 # =========================================================
 
+async def health_check(request: web.Request) -> web.Response:
+    """Simple HTTP 200 endpoint for UptimeRobot and host health checks."""
+    return web.Response(text="OK\n", content_type="text/plain")
+
+
+async def start_health_server():
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", "8080"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Health-check đang chạy trên cổng {port} (GET / hoặc /health).")
+    return runner
+
+
 @bot.event
 async def on_ready():
     print(f"Bot đã đăng nhập: {bot.user}")
@@ -990,9 +1010,13 @@ async def main():
         )
 
     init_db()
+    web_runner = await start_health_server()
 
-    async with bot:
-        await bot.start(TOKEN)
+    try:
+        async with bot:
+            await bot.start(TOKEN)
+    finally:
+        await web_runner.cleanup()
 
 
 if __name__ == "__main__":
