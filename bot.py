@@ -49,6 +49,24 @@ ITEM_SHOP = {
     "thien_loi": {
         "name": "⚡ Thiên Lôi",
         "price": 300_000,
+        "description": "Dùng lên người khác để lấy 3% Bảo khố hiện tại.",
+        "kind": "consumable",
+    },
+    "toa_tu_hoang_kim_giap": {
+        "name": "🛡️ Tỏa Tử Hoàng Kim Giáp",
+        "price": 500_000,
+        "description": (
+            "Giúp bảo vệ người dùng khỏi một lần ăn thiên phạt. "
+            "Tự kích hoạt từ túi đồ khi bị Thiên Lôi nhắm tới."
+        ),
+        "kind": "consumable",
+    },
+    "do_kiep": {
+        "name": "🗡️ Độ Kiếp",
+        "price": 99_999_999,
+        "description": "Độ Kiếp Thành Công Nhập Ma hay Tu Tâm Thành Phật Do Bạn Chọn.",
+        "kind": "role",
+        "role_name": "Độ Kiếp",
     }
 }
 
@@ -56,6 +74,8 @@ ITEM_SHOP = {
 def get_role_bet_bonus(member, bet: int):
     """Return (bonus_amount, bonus_percent, role_name) for the highest role."""
     owned_role_names = {role.name for role in getattr(member, "roles", ())}
+    if "Độ Kiếp" in owned_role_names:
+        return bet * 50 // 100, 50, "Độ Kiếp"
     for (role_name, _), percent in reversed(
         list(zip(ROLE_SHOP, ROLE_BET_BONUS_PERCENT))
     ):
@@ -79,6 +99,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 RED_ENVELOPE_RECOVERY_DONE = False
 RED_ENVELOPE_EXPIRY_TASKS = set()
+ROLE_PURCHASE_LOCKS = {}
 
 
 # =========================================================
@@ -133,6 +154,15 @@ def init_db():
                 item_key TEXT NOT NULL,
                 quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
                 PRIMARY KEY (user_id, item_key)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS role_item_purchases (
+                user_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                item_key TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                PRIMARY KEY (user_id, guild_id, item_key)
             )
         """)
         conn.commit()
@@ -255,7 +285,7 @@ def spend_balance(user_id: int, amount: int):
 def buy_item(user_id: int, item_key: str):
     """Atomically charge the shop price and add one item to inventory."""
     item = ITEM_SHOP.get(item_key)
-    if item is None:
+    if item is None or item.get("kind") == "role":
         return None
     price = item["price"]
     with sqlite3.connect(DB_FILE, timeout=10) as conn:
@@ -299,8 +329,77 @@ def get_item_inventory(user_id: int):
         return {item_key: int(quantity) for item_key, quantity in rows}
 
 
-def use_thunder_item(user_id: int, target_id: int):
-    """Consume one Thunder item and remove 3% of the target's live balance."""
+def reserve_role_item_purchase(user_id: int, guild_id: int, item_key: str, price: int):
+    """Charge once and create/reuse a pending role grant for crash-safe retries."""
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT status FROM role_item_purchases "
+            "WHERE user_id = ? AND guild_id = ? AND item_key = ?",
+            (user_id, guild_id, item_key)
+        ).fetchone()
+        conn.execute(
+            "INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, ?)",
+            (user_id, STARTING_BALANCE)
+        )
+        balance = int(conn.execute(
+            "SELECT balance FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()[0])
+        if existing:
+            conn.rollback()
+            return existing[0], balance
+
+        cursor = conn.execute(
+            "UPDATE users SET balance = balance - ? "
+            "WHERE user_id = ? AND balance >= ?",
+            (price, user_id, price)
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return "insufficient", balance
+        conn.execute(
+            "INSERT INTO role_item_purchases (user_id, guild_id, item_key, status) "
+            "VALUES (?, ?, ?, 'pending')",
+            (user_id, guild_id, item_key)
+        )
+        balance -= price
+        conn.commit()
+        return "pending", balance
+
+
+def complete_role_item_purchase(user_id: int, guild_id: int, item_key: str):
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.execute(
+            "UPDATE role_item_purchases SET status = 'granted' "
+            "WHERE user_id = ? AND guild_id = ? AND item_key = ?",
+            (user_id, guild_id, item_key)
+        )
+        conn.commit()
+
+
+def refund_pending_role_item_purchase(
+    user_id: int, guild_id: int, item_key: str, price: int
+):
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute(
+            "DELETE FROM role_item_purchases "
+            "WHERE user_id = ? AND guild_id = ? AND item_key = ? AND status = 'pending'",
+            (user_id, guild_id, item_key)
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return False
+        conn.execute(
+            "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+            (price, user_id)
+        )
+        conn.commit()
+        return True
+
+
+def use_thunder_item(user_id: int, target_id: int, target_is_do_kiep: bool = False):
+    """Resolve Thunder atomically against Do Kiep immunity or one-use armor."""
     if user_id == target_id:
         return "self_target", 0, 0
     with sqlite3.connect(DB_FILE, timeout=10) as conn:
@@ -313,6 +412,9 @@ def use_thunder_item(user_id: int, target_id: int):
         if item is None or item[0] <= 0:
             conn.rollback()
             return "no_item", 0, 0
+        if target_is_do_kiep:
+            conn.rollback()
+            return "do_kiep_immunity", 0, 0
 
         conn.execute(
             "INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, ?)",
@@ -321,6 +423,27 @@ def use_thunder_item(user_id: int, target_id: int):
         target_balance = int(conn.execute(
             "SELECT balance FROM users WHERE user_id = ?", (target_id,)
         ).fetchone()[0])
+
+        armor = conn.execute(
+            "SELECT quantity FROM item_inventory "
+            "WHERE user_id = ? AND item_key = 'toa_tu_hoang_kim_giap'",
+            (target_id,)
+        ).fetchone()
+        if armor and armor[0] > 0:
+            conn.execute(
+                "UPDATE item_inventory SET quantity = quantity - 1 "
+                "WHERE user_id = ? AND item_key = 'toa_tu_hoang_kim_giap' "
+                "AND quantity > 0",
+                (target_id,)
+            )
+            conn.execute(
+                "UPDATE item_inventory SET quantity = quantity - 1 "
+                "WHERE user_id = ? AND item_key = 'thien_loi' AND quantity > 0",
+                (user_id,)
+            )
+            conn.commit()
+            return "protected", 0, target_balance
+
         damage = target_balance * 3 // 100
         if damage < 1:
             conn.rollback()
@@ -1223,18 +1346,112 @@ async def balance(interaction: discord.Interaction):
     description="Xem shop vật phẩm Linh Thạch"
 )
 async def shop_vat_pham(interaction: discord.Interaction):
-    item = ITEM_SHOP["thien_loi"]
     embed = discord.Embed(
         title="🛒 Shop vật phẩm",
-        description=(
-            f"**{item['name']}** — **{item['price']:,} {CURRENCY_NAME}**\n"
-            "Dùng `/mua_vat_pham` để mua và `/dung_thien_loi` để sử dụng. "
-            "Khi trúng, Thiên Lôi lấy 3% Bảo khố hiện tại của mục tiêu "
-            "(làm tròn xuống)."
-        ),
+        description="Dùng `/mua_vat_pham` để mua vật phẩm hoặc role.",
         color=0xF1C40F
     )
+    for item in ITEM_SHOP.values():
+        embed.add_field(
+            name=f"{item['name']} — {item['price']:,} {CURRENCY_NAME}",
+            value=item["description"],
+            inline=False
+        )
+    embed.set_footer(
+        text="Giáp tự chặn một lần Thiên Lôi; Độ Kiếp miễn nhiễm Thiên Lôi và tăng 50% thưởng Blackjack."
+    )
     await interaction.response.send_message(embed=embed)
+
+
+async def cap_do_kiep(interaction: discord.Interaction, item: dict):
+    if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(
+            "❌ Chỉ có thể mua role Độ Kiếp trong server.", ephemeral=True
+        )
+        return
+
+    member = interaction.user
+    guild = interaction.guild
+    role_name = item["role_name"]
+    role = discord.utils.get(guild.roles, name=role_name)
+    prerequisite = discord.utils.get(guild.roles, name="Hợp Thể")
+    if role is None:
+        refund_pending_role_item_purchase(
+            member.id, guild.id, "do_kiep", item["price"]
+        )
+        await interaction.response.send_message(
+            f"❌ Server chưa tạo role **{role_name}**.", ephemeral=True
+        )
+        return
+    if prerequisite is None:
+        refund_pending_role_item_purchase(
+            member.id, guild.id, "do_kiep", item["price"]
+        )
+        await interaction.response.send_message(
+            "❌ Server chưa tạo role tiền đề **Hợp Thể**.", ephemeral=True
+        )
+        return
+    if not guild.me or not guild.me.guild_permissions.manage_roles or not role.is_assignable():
+        refund_pending_role_item_purchase(
+            member.id, guild.id, "do_kiep", item["price"]
+        )
+        await interaction.response.send_message(
+            "❌ Bot cần quyền Manage Roles và role Độ Kiếp phải nằm dưới "
+            "role cao nhất của bot.", ephemeral=True
+        )
+        return
+
+    lock_key = (guild.id, member.id, "do_kiep")
+    lock = ROLE_PURCHASE_LOCKS.setdefault(lock_key, asyncio.Lock())
+    async with lock:
+        if role in member.roles:
+            complete_role_item_purchase(member.id, guild.id, "do_kiep")
+            await interaction.response.send_message(
+                "✅ Bạn đã sở hữu role **Độ Kiếp** rồi.", ephemeral=True
+            )
+            return
+        if prerequisite not in member.roles:
+            refund_pending_role_item_purchase(
+                member.id, guild.id, "do_kiep", item["price"]
+            )
+            await interaction.response.send_message(
+                "🔒 Để mua **🗡️ Độ Kiếp**, bạn phải sở hữu role **Hợp Thể** trước.",
+                ephemeral=True
+            )
+            return
+
+        status, balance = reserve_role_item_purchase(
+            member.id, guild.id, "do_kiep", item["price"]
+        )
+        if status == "insufficient":
+            await interaction.response.send_message(
+                f"❌ Không đủ Linh Thạch mua **{item['name']}** "
+                f"(giá **{item['price']:,}**). Bảo khố hiện có "
+                f"**{balance:,} {CURRENCY_NAME}**.",
+                ephemeral=True
+            )
+            return
+
+        try:
+            await member.add_roles(role, reason="Mua role Độ Kiếp trong shop vật phẩm")
+        except (discord.Forbidden, discord.HTTPException) as error:
+            refunded = refund_pending_role_item_purchase(
+                member.id, guild.id, "do_kiep", item["price"]
+            )
+            print(
+                f"Không cấp được role Độ Kiếp cho {member.id}; "
+                f"đã hoàn tiền={refunded}: {error}"
+            )
+            await interaction.response.send_message(
+                "❌ Bot cấp role Độ Kiếp không thành công; Linh Thạch đã được "
+                "hoàn lại nếu giao dịch mới được tạo.", ephemeral=True
+            )
+            return
+
+        complete_role_item_purchase(member.id, guild.id, "do_kiep")
+        await interaction.response.send_message(
+            f"{member.mention} đã độ kiếp thành công từ Hợp Thể lên Độ Kiếp!"
+        )
 
 
 @bot.tree.command(
@@ -1264,6 +1481,9 @@ async def mua_vat_pham(
             "❌ Vật phẩm này không tồn tại trong shop.", ephemeral=True
         )
         return
+    if item.get("kind") == "role":
+        await cap_do_kiep(interaction, item)
+        return
 
     purchase = buy_item(interaction.user.id, vat_pham.value)
     if purchase is None:
@@ -1289,16 +1509,24 @@ async def mua_vat_pham(
 )
 async def kho_vat_pham(interaction: discord.Interaction):
     inventory = get_item_inventory(interaction.user.id)
+    if isinstance(interaction.user, discord.Member) and any(
+        role.name == "Độ Kiếp" for role in interaction.user.roles
+    ):
+        inventory["do_kiep_owned"] = 1
     if not inventory:
         await interaction.response.send_message(
             "🎒 Túi đồ của bạn hiện đang trống. Dùng `/shop_vat_pham` để xem shop.",
             ephemeral=True
         )
         return
-    lines = [
-        f"**{ITEM_SHOP.get(key, {'name': key})['name']}** × **{quantity}**"
-        for key, quantity in inventory.items()
-    ]
+    lines = []
+    for key, quantity in inventory.items():
+        if key == "do_kiep_owned":
+            lines.append("**🗡️ Độ Kiếp** — role đang sở hữu")
+        else:
+            lines.append(
+                f"**{ITEM_SHOP.get(key, {'name': key})['name']}** × **{quantity}**"
+            )
     await interaction.response.send_message(
         "🎒 **Túi vật phẩm của bạn**\n" + "\n".join(lines),
         ephemeral=True
@@ -1327,13 +1555,28 @@ async def dung_thien_loi(
         )
         return
 
+    do_kiep_role = discord.utils.get(interaction.guild.roles, name="Độ Kiếp")
+    target_is_do_kiep = do_kiep_role is not None and do_kiep_role in nguoi_choi.roles
     status, damage, _target_balance = use_thunder_item(
-        interaction.user.id, nguoi_choi.id
+        interaction.user.id,
+        nguoi_choi.id,
+        target_is_do_kiep=target_is_do_kiep
     )
+    if status == "protected":
+        await interaction.response.send_message(
+            f"⚡ Nhận thiên phạt từ {interaction.user.mention}, ý chí, kiên cường, "
+            f"bất khuất của **🛡️ Tỏa Tử Hoàng Kim Giáp** đã bảo vệ "
+            f"{nguoi_choi.mention} khỏi việc bị thoát kiếp!"
+        )
+        return
     if status != "success":
         messages = {
             "self_target": "❌ Bạn không thể dùng Thiên Lôi lên chính mình.",
             "no_item": "❌ Bạn không có **⚡ Thiên Lôi** trong túi đồ. Hãy mua tại `/shop_vat_pham`.",
+            "do_kiep_immunity": (
+                f"⚔️ {nguoi_choi.mention} sở hữu cảnh giới **Độ Kiếp** và miễn nhiễm "
+                "với Thiên Lôi. Vật phẩm của bạn chưa bị tiêu thụ."
+            ),
             "target_balance_too_low": (
                 "❌ Bảo khố của mục tiêu quá thấp để 3% tạo ra ít nhất "
                 "1 Linh Thạch; vật phẩm chưa bị tiêu thụ."
@@ -1535,6 +1778,8 @@ async def mua_role(
     higher_owned = [name for name, _ in ROLE_SHOP[index + 1:]
                     if discord.utils.get(interaction.guild.roles, name=name)
                     in member.roles]
+    if any(owned.name == "Độ Kiếp" for owned in member.roles):
+        higher_owned.append("Độ Kiếp")
     if higher_owned:
         await interaction.response.send_message(
             "❌ Bạn đã sở hữu role bậc cao hơn nên không thể mua lại role thấp hơn.",

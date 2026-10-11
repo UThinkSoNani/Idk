@@ -25,4 +25,6 @@ Use `/phat_bao_li_xi tong_tien so_suat` in a server channel to create a public, 
 
 ## Item shop: Thunder
 
-Use `/shop_vat_pham` to view the item, `/mua_vat_pham` to buy **⚡ Thiên Lôi** for 300,000 Linh Thạch, and `/kho_vat_pham` to see your inventory. Use `/dung_thien_loi nguoi_choi` to consume one item and remove 3% of that player's current Bảo khố (rounded down). The target must be another non-bot member of the same server; if 3% rounds to zero, the item is not consumed.
+Use `/shop_vat_pham` to view all items and `/mua_vat_pham` to buy them. **⚡ Thiên Lôi** costs 300,000 Linh Thạch; `/dung_thien_loi nguoi_choi` removes 3% of the target's current Bảo khố, rounded down. The target must be another non-bot member of the same server; if 3% rounds to zero, the item is not consumed.
+
+**🛡️ Tỏa Tử Hoàng Kim Giáp** costs 500,000 Linh Thạch and automatically consumes itself to block one Thunder strike; the attacker's Thunder item is also consumed by the blocked attempt. **🗡️ Độ Kiếp** costs 99,999,999 Linh Thạch and can only be purchased by a member who has the Discord role **Hợp Thể**. Buying it grants the server role **Độ Kiếp**, which grants an additional Blackjack win bonus of 50% of the original wager and permanently prevents Thunder attacks. An immune target does not consume the attacker's Thunder item. Create Discord roles named `Hợp Thể` and `Độ Kiếp`; the bot needs Manage Roles and its highest role must be above `Độ Kiếp`. The role and shield are also displayed in `/kho_vat_pham`.
