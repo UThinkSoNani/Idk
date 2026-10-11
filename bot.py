@@ -792,8 +792,7 @@ async def mua_role(
         return
 
     await interaction.response.send_message(
-        f"🎉 Bạn đã mua role **{role_name}** với giá **{price:,} "
-        f"{CURRENCY_NAME}**. Số dư còn lại: **{remaining:,} {CURRENCY_NAME}**."
+        f"Chúc Mừng {member.mention} đã đạt đến cảnh giới **{role_name}**!"
     )
 
 
