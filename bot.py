@@ -211,6 +211,44 @@ def spend_balance(user_id: int, amount: int):
         return int(balance)
 
 
+def transfer_balance(sender_id: int, recipient_id: int, amount: int):
+    """Transfer currency atomically; return new balances, or None if invalid/poor."""
+    if sender_id == recipient_id or amount <= 0:
+        return None
+
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, ?)",
+            (sender_id, STARTING_BALANCE)
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, ?)",
+            (recipient_id, STARTING_BALANCE)
+        )
+        cursor = conn.execute(
+            "UPDATE users SET balance = balance - ? "
+            "WHERE user_id = ? AND balance >= ?",
+            (amount, sender_id, amount)
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return None
+
+        conn.execute(
+            "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+            (amount, recipient_id)
+        )
+        sender_balance = conn.execute(
+            "SELECT balance FROM users WHERE user_id = ?", (sender_id,)
+        ).fetchone()[0]
+        recipient_balance = conn.execute(
+            "SELECT balance FROM users WHERE user_id = ?", (recipient_id,)
+        ).fetchone()[0]
+        conn.commit()
+        return int(sender_balance), int(recipient_balance)
+
+
 # =========================================================
 # 3. PHAN THUONG VA THOI GIAN CHO
 # =========================================================
@@ -693,6 +731,56 @@ async def balance(interaction: discord.Interaction):
 
 
 @bot.tree.command(
+    name="chuyen_linh_thach",
+    description="Tặng Linh Thạch cho một người chơi trong server"
+)
+@app_commands.describe(
+    nguoi_nhan="Người chơi nhận Linh Thạch",
+    so_luong="Số Linh Thạch muốn tặng"
+)
+async def chuyen_linh_thach(
+    interaction: discord.Interaction,
+    nguoi_nhan: discord.Member,
+    so_luong: app_commands.Range[int, 1, 1_000_000_000]
+):
+    if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(
+            "❌ Lệnh chuyển Linh Thạch chỉ dùng được trong server.",
+            ephemeral=True
+        )
+        return
+
+    nguoi_gui = interaction.user
+    if nguoi_nhan.bot:
+        await interaction.response.send_message(
+            "❌ Bạn chỉ có thể tặng Linh Thạch cho người chơi, không thể tặng bot.",
+            ephemeral=True
+        )
+        return
+    if nguoi_nhan.id == nguoi_gui.id:
+        await interaction.response.send_message(
+            "❌ Bạn không thể tự chuyển Linh Thạch cho chính mình.",
+            ephemeral=True
+        )
+        return
+
+    balances = transfer_balance(nguoi_gui.id, nguoi_nhan.id, so_luong)
+    if balances is None:
+        bao_kho = get_balance(nguoi_gui.id)
+        await interaction.response.send_message(
+            f"❌ Bảo khố không đủ để tặng **{so_luong:,} {CURRENCY_NAME}**. "
+            f"Bảo khố hiện tại: **{bao_kho:,} {CURRENCY_NAME}**.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"{nguoi_nhan.mention} đã nhận được **{so_luong:,} {CURRENCY_NAME}** "
+        f"của {nguoi_gui.mention}, xem như là quà bố thí."
+    )
+
+
+@bot.tree.command(
     name="shop",
     description="Xem các role tu luyện và giá bằng Linh Thạch"
 )
@@ -869,6 +957,7 @@ async def bang_chuc_nang(interaction: discord.Interaction):
             "`/blackjack cuoc` — Chơi Blackjack.\n"
             "Sở hữu role shop sẽ tăng tiền lãi Blackjack khi thắng (chỉ áp dụng role bậc cao nhất).\n"
             "`/balance` — Xem Bảo khố.\n"
+            "`/chuyen_linh_thach nguoi_nhan so_luong` — Tặng Linh Thạch cho người chơi trong server.\n"
             "`/leaderboard` — Xem top người chơi và hạng của bạn.\n"
             "`/shop` — Xem role tu luyện và giá.\n"
             "`/mua_role` — Mua role kế tiếp bằng Linh Thạch.\n"
