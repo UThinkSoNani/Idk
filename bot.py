@@ -49,7 +49,7 @@ ROLE_SHOP = [
 ]
 ROLE_BET_BONUS_PERCENT = (1, 3, 5, 8, 10, 12, 15, 20)
 MAX_ITEM_PURCHASE_QUANTITY = 1000
-BAO_LI_XI_MIN_REWARD = 1_000
+BAO_LI_XI_MIN_REWARD = 1
 BAO_LI_XI_MAX_REWARD = 10_000
 BAO_LI_XI_JACKPOT_REWARD = 1_000_000
 BAO_LI_XI_JACKPOT_ONE_IN = 1_000_000
@@ -78,7 +78,7 @@ ITEM_SHOP = {
     "bao_li_xi": {
         "name": "🧧 Bao Lì Xì",
         "price": 1_000,
-        "description": "Quay Tay Vận May Sẽ Đến. Random 1.000–10.000 Linh Thạch.",
+        "description": "Quay Tay Vận May Sẽ Đến. Random 1–10.000 Linh Thạch.",
         "kind": "consumable",
     },
     "do_kiep": {
