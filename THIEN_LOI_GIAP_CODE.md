@@ -305,7 +305,7 @@ return True, reward, bonus
 
 1. `/shop_vat_pham` — xem giá.
 2. `/mua_vat_pham` — mua vật phẩm trong shop.
-3. `/dung_vat_pham` — chọn Thiên Lôi để nhắm thành viên; giáp để kích hoạt lượt chắn; Đan Dược để bật buff +5% trong 10 phút; hoặc Bao Lì Xì và `so_luong` 1–50 để mở nhiều bao với lượt random độc lập, cộng bonus role/Đan Dược.
+3. `/dung_vat_pham` — chọn Thiên Lôi để nhắm thành viên; giáp để kích hoạt lượt chắn; Đan Dược để bật buff +5% trong 10 phút; hoặc Bao Lì Xì và `so_luong` 1–50 để mở nhiều bao với lượt random độc lập. Kết quả từng bao nằm trong field riêng của embed; phần mô tả embed tóm tắt tổng thưởng và bonus.
 4. `/kho_vat_pham` — xem vật phẩm chưa dùng, lượt chắn và thời gian buff còn lại.
 
 Sau khi cập nhật, khởi động/redeploy bot để `bot.tree.sync()` đăng ký lựa chọn vật phẩm. Các bảng `active_protections` và `user_reward_buffs` được tạo tự động bởi `init_db()`.

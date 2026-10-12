@@ -1966,26 +1966,31 @@ async def dung_vat_pham(
             return
         envelope_rewards, base_total, role_bonus, potion_bonus, _balance, remaining = result
         total_reward = sum(envelope_rewards)
-        bonus_note = ""
-        if role_bonus or potion_bonus:
-            bonus_parts = []
-            if role_bonus:
-                bonus_parts.append(f"role +{role_bonus:,}")
-            if potion_bonus:
-                bonus_parts.append(f"Đan Dược +{potion_bonus:,}")
-            bonus_note = (
-                f"\nThưởng gốc **{base_total:,}**; "
-                + ", ".join(bonus_parts)
-            )
         reward_lines = "\n".join(
-            f"{index}. **{reward:,} {CURRENCY_NAME}**"
+            f"{index:02d}) {reward:,}"
             for index, reward in enumerate(envelope_rewards, start=1)
         )
+        embed = discord.Embed(
+            title="🧧 Kết quả mở Bao Lì Xì",
+            description=(
+                f"**Số bao mở:** {so_luong}\n"
+                f"**Tổng nhận:** **{total_reward:,} {CURRENCY_NAME}**\n"
+                f"Thưởng gốc: {base_total:,} {CURRENCY_NAME}\n"
+                f"Bonus role: +{role_bonus:,} {CURRENCY_NAME}\n"
+                f"Bonus Đan Dược: +{potion_bonus:,} {CURRENCY_NAME}\n"
+                f"Bảo khố mới: {_balance:,} {CURRENCY_NAME}\n"
+                f"Bao còn trong túi: {remaining}"
+            ),
+            color=0xF1C40F
+        )
+        embed.add_field(
+            name=f"Kết quả từng bao ({CURRENCY_NAME})",
+            value=reward_lines,
+            inline=False
+        )
         await interaction.response.send_message(
-            f"🧧 {interaction.user.mention} đã lắc **{so_luong}** Bao Lì Xì ra:\n"
-            f"{reward_lines}\n"
-            f"💰 Tổng nhận: **{total_reward:,} {CURRENCY_NAME}**"
-            f"{bonus_note}\nCòn **{remaining}** Bao Lì Xì."
+            content=f"🧧 {interaction.user.mention} đã lắc {so_luong} Bao Lì Xì!",
+            embed=embed
         )
         return
 
