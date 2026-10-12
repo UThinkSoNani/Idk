@@ -265,8 +265,8 @@ async def dung_vat_pham(
     # - nếu vat_pham.value == "dan_duoc_truong_sinh", không nhận target,
     #   gọi activate_reward_potion(interaction.user.id).
     # - nếu vat_pham.value == "bao_li_xi", không nhận target,
-    #   gọi open_lucky_envelope(); kết quả gồm random base 10–1.000.000
-    #   cộng role bonus cao nhất và buff Đan Dược nếu còn hiệu lực.
+    #   gọi open_lucky_envelope(quantity=so_luong); mỗi bao có một lần
+    #   random 10–1.000.000 riêng, cộng role/buff cho từng bao.
     ...
 ```
 
@@ -305,7 +305,7 @@ return True, reward, bonus
 
 1. `/shop_vat_pham` — xem giá.
 2. `/mua_vat_pham` — mua vật phẩm trong shop.
-3. `/dung_vat_pham` — chọn Thiên Lôi để nhắm thành viên; giáp để kích hoạt lượt chắn; Đan Dược để bật buff +5% trong 10 phút; hoặc Bao Lì Xì để mở một bao, nhận thưởng ngẫu nhiên cộng bonus role/Đan Dược.
+3. `/dung_vat_pham` — chọn Thiên Lôi để nhắm thành viên; giáp để kích hoạt lượt chắn; Đan Dược để bật buff +5% trong 10 phút; hoặc Bao Lì Xì và `so_luong` 1–50 để mở nhiều bao với lượt random độc lập, cộng bonus role/Đan Dược.
 4. `/kho_vat_pham` — xem vật phẩm chưa dùng, lượt chắn và thời gian buff còn lại.
 
 Sau khi cập nhật, khởi động/redeploy bot để `bot.tree.sync()` đăng ký lựa chọn vật phẩm. Các bảng `active_protections` và `user_reward_buffs` được tạo tự động bởi `init_db()`.

@@ -545,8 +545,20 @@ def get_reward_buff_seconds(user_id: int):
     return max(0, int(row[0] - time.time())) if row else 0
 
 
-def open_lucky_envelope(user_id: int, role_bonus_percent: int = 0):
-    """Consume one envelope and atomically grant its random reward and bonuses."""
+MAX_ENVELOPES_PER_USE = 50
+
+
+def open_lucky_envelope(
+    user_id: int,
+    role_bonus_percent: int = 0,
+    quantity: int = 1
+):
+    """Open quantity envelopes with independent rolls in one atomic transaction."""
+    if not isinstance(quantity, int) or isinstance(quantity, bool):
+        return None
+    if not 1 <= quantity <= MAX_ENVELOPES_PER_USE:
+        return None
+
     now = time.time()
     item_key = "bao_li_xi"
     with sqlite3.connect(DB_FILE, timeout=10) as conn:
@@ -555,27 +567,36 @@ def open_lucky_envelope(user_id: int, role_bonus_percent: int = 0):
             "SELECT quantity FROM item_inventory WHERE user_id = ? AND item_key = ?",
             (user_id, item_key)
         ).fetchone()
-        if item is None or item[0] <= 0:
+        if item is None or item[0] < quantity:
             conn.rollback()
             return None
 
-        base_reward = random.randint(10, 1_000_000)
-        role_bonus = base_reward * max(0, role_bonus_percent) // 100
         active_buff = conn.execute(
             "SELECT expires_at FROM user_reward_buffs "
             "WHERE user_id = ? AND buff_key = 'dan_duoc_truong_sinh'",
             (user_id,)
         ).fetchone()
-        potion_bonus = (
-            base_reward * DAN_DUOC_REWARD_BONUS_PERCENT // 100
-            if active_buff and active_buff[0] > now else 0
-        )
-        total_reward = base_reward + role_bonus + potion_bonus
+        potion_active = bool(active_buff and active_buff[0] > now)
+        envelope_rewards = []
+        base_total = 0
+        role_bonus_total = 0
+        potion_bonus_total = 0
+        for _ in range(quantity):
+            base_reward = random.randint(10, 1_000_000)
+            role_bonus = base_reward * max(0, role_bonus_percent) // 100
+            potion_bonus = (
+                base_reward * DAN_DUOC_REWARD_BONUS_PERCENT // 100
+                if potion_active else 0
+            )
+            envelope_rewards.append(base_reward + role_bonus + potion_bonus)
+            base_total += base_reward
+            role_bonus_total += role_bonus
+            potion_bonus_total += potion_bonus
 
         cursor = conn.execute(
-            "UPDATE item_inventory SET quantity = quantity - 1 "
-            "WHERE user_id = ? AND item_key = ? AND quantity > 0",
-            (user_id, item_key)
+            "UPDATE item_inventory SET quantity = quantity - ? "
+            "WHERE user_id = ? AND item_key = ? AND quantity >= ?",
+            (quantity, user_id, item_key, quantity)
         )
         if cursor.rowcount != 1:
             conn.rollback()
@@ -584,6 +605,7 @@ def open_lucky_envelope(user_id: int, role_bonus_percent: int = 0):
             "INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, ?)",
             (user_id, STARTING_BALANCE)
         )
+        total_reward = sum(envelope_rewards)
         conn.execute(
             "UPDATE users SET balance = balance + ? WHERE user_id = ?",
             (total_reward, user_id)
@@ -596,7 +618,14 @@ def open_lucky_envelope(user_id: int, role_bonus_percent: int = 0):
             (user_id, item_key)
         ).fetchone()[0])
         conn.commit()
-        return base_reward, role_bonus, potion_bonus, balance, remaining
+        return (
+            envelope_rewards,
+            base_total,
+            role_bonus_total,
+            potion_bonus_total,
+            balance,
+            remaining
+        )
 
 
 def use_thunder_item(user_id: int, target_id: int, target_is_do_kiep: bool = False):
@@ -1779,11 +1808,12 @@ async def kho_vat_pham(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="dung_vat_pham",
-    description="Dùng vật phẩm đã mua; chọn mục tiêu nếu dùng Thiên Lôi"
+    description="Dùng vật phẩm; chọn mục tiêu Thiên Lôi hoặc số Bao Lì Xì muốn mở"
 )
 @app_commands.describe(
     vat_pham="Chọn vật phẩm tiêu thụ để dùng",
-    nguoi_choi="Chỉ chọn người chơi này khi dùng Thiên Lôi"
+    nguoi_choi="Chỉ chọn người chơi này khi dùng Thiên Lôi",
+    so_luong="Số Bao Lì Xì mở cùng lúc (1–50; chỉ dùng khi chọn Bao Lì Xì)"
 )
 @app_commands.choices(vat_pham=[
     app_commands.Choice(
@@ -1796,11 +1826,20 @@ async def kho_vat_pham(interaction: discord.Interaction):
 async def dung_vat_pham(
     interaction: discord.Interaction,
     vat_pham: app_commands.Choice[str],
-    nguoi_choi: discord.Member | None = None
+    nguoi_choi: discord.Member | None = None,
+    so_luong: app_commands.Range[int, 1, MAX_ENVELOPES_PER_USE] = 1
 ):
     if interaction.guild is None or not isinstance(interaction.user, discord.Member):
         await interaction.response.send_message(
             "❌ Lệnh dùng vật phẩm chỉ dùng được trong server.",
+            ephemeral=True
+        )
+        return
+
+    if vat_pham.value != "bao_li_xi" and so_luong != 1:
+        await interaction.response.send_message(
+            "❌ Số lượng chỉ dùng được với **🧧 Bao Lì Xì**. "
+            "Với vật phẩm khác, hãy để số lượng là **1**.",
             ephemeral=True
         )
         return
@@ -1914,15 +1953,19 @@ async def dung_vat_pham(
             )
             return
         _, role_bonus_percent, _role_name = get_role_bet_bonus(interaction.user, 100)
-        result = open_lucky_envelope(interaction.user.id, role_bonus_percent)
+        result = open_lucky_envelope(
+            interaction.user.id, role_bonus_percent, so_luong
+        )
         if result is None:
+            available = get_item_inventory(interaction.user.id).get("bao_li_xi", 0)
             await interaction.response.send_message(
-                "❌ Bạn không có **🧧 Bao Lì Xì** trong túi đồ.",
+                f"❌ Bạn chọn mở **{so_luong}** Bao Lì Xì nhưng túi đồ chỉ có "
+                f"**{available}** chiếc.",
                 ephemeral=True
             )
             return
-        base_reward, role_bonus, potion_bonus, _balance, remaining = result
-        total_reward = base_reward + role_bonus + potion_bonus
+        envelope_rewards, base_total, role_bonus, potion_bonus, _balance, remaining = result
+        total_reward = sum(envelope_rewards)
         bonus_note = ""
         if role_bonus or potion_bonus:
             bonus_parts = []
@@ -1930,11 +1973,19 @@ async def dung_vat_pham(
                 bonus_parts.append(f"role +{role_bonus:,}")
             if potion_bonus:
                 bonus_parts.append(f"Đan Dược +{potion_bonus:,}")
-            bonus_note = " (" + ", ".join(bonus_parts) + ")"
+            bonus_note = (
+                f"\nThưởng gốc **{base_total:,}**; "
+                + ", ".join(bonus_parts)
+            )
+        reward_lines = "\n".join(
+            f"{index}. **{reward:,} {CURRENCY_NAME}**"
+            for index, reward in enumerate(envelope_rewards, start=1)
+        )
         await interaction.response.send_message(
-            f"🧧 {interaction.user.mention} đã lắc lì xì ra "
-            f"**{total_reward:,} {CURRENCY_NAME}**{bonus_note}! "
-            f"Còn **{remaining}** Bao Lì Xì."
+            f"🧧 {interaction.user.mention} đã lắc **{so_luong}** Bao Lì Xì ra:\n"
+            f"{reward_lines}\n"
+            f"💰 Tổng nhận: **{total_reward:,} {CURRENCY_NAME}**"
+            f"{bonus_note}\nCòn **{remaining}** Bao Lì Xì."
         )
         return
 
@@ -2248,7 +2299,7 @@ async def bang_chuc_nang(interaction: discord.Interaction):
             "`/shop_vat_pham` — Xem shop vật phẩm.\n"
             "`/mua_vat_pham` — Mua vật phẩm; chọn số lượng 1–1.000 (riêng role Độ Kiếp chỉ mua 1).\n"
             "`/kho_vat_pham` — Xem túi vật phẩm.\n"
-            "`/dung_vat_pham` — Chọn Thiên Lôi, kích hoạt giáp, dùng Đan Dược hoặc mở Bao Lì Xì nhận thưởng ngẫu nhiên.\n"
+            "`/dung_vat_pham` — Chọn vật phẩm; có thể mở 1–50 Bao Lì Xì mỗi lần.\n"
             "`/diem_danh` — Điểm danh mỗi 24 giờ.\n"
             "`/khai_thac` — Khai thác mỗi giờ.\n"
             "`/nhiem_vu` — Nhận thưởng mỗi 6 giờ.\n"
