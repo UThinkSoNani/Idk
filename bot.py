@@ -1,6 +1,7 @@
 import os
 import random
 import sqlite3
+from pathlib import Path
 import time
 import asyncio
 
@@ -27,7 +28,9 @@ def normalize_discord_token(token: str | None) -> str:
 
 
 TOKEN = normalize_discord_token(os.getenv("DISCORD_TOKEN"))
-DB_FILE = "linh_thach.db"
+APP_DIR = Path(__file__).resolve().parent
+LEGACY_DB_FILE = APP_DIR / "linh_thach.db"
+DB_FILE = Path(os.getenv("DATABASE_PATH", str(LEGACY_DB_FILE))).expanduser().resolve()
 CURRENCY_NAME = "Linh Thạch"
 
 STARTING_BALANCE = 1000
@@ -112,7 +115,33 @@ ROLE_PURCHASE_LOCKS = {}
 # 2. CO SO DU LIEU SQLITE
 # =========================================================
 
+def prepare_database_path():
+    """Prepare configured DB storage and preserve a legacy SQLite file once."""
+    DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    if DB_FILE != LEGACY_DB_FILE and not DB_FILE.exists() and LEGACY_DB_FILE.is_file():
+        # SQLite's backup API includes committed WAL content and leaves the source intact.
+        with sqlite3.connect(str(LEGACY_DB_FILE)) as source:
+            with sqlite3.connect(str(DB_FILE)) as destination:
+                source.backup(destination)
+        print(f"Đã chuyển database hiện có sang persistent path: {DB_FILE}")
+
+    if os.getenv("RENDER") and not os.getenv("DATABASE_PATH"):
+        print(
+            "CẢNH BÁO: DATABASE_PATH chưa được cấu hình trên Render. "
+            "SQLite hiện nằm trên filesystem tạm và có thể mất khi restart/deploy. "
+            "Hãy gắn Persistent Disk tại /var/data và đặt DATABASE_PATH=/var/data/linh_thach.db."
+        )
+    elif os.getenv("RENDER") and not str(DB_FILE).startswith("/var/data/"):
+        print(
+            f"CẢNH BÁO: DATABASE_PATH hiện là {DB_FILE}, không nằm dưới /var/data. "
+            "Hãy xác nhận path này thuộc Persistent Disk của Render; filesystem còn lại là tạm."
+        )
+    print(f"SQLite database: {DB_FILE}")
+
+
 def init_db():
+    prepare_database_path()
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (

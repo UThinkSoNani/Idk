@@ -9,6 +9,12 @@ The bot serves a lightweight HTTP health endpoint alongside the Discord connecti
 
 The server binds to `0.0.0.0` and uses the hosting platform's `PORT` environment variable (default: `8080`). Set up an UptimeRobot **HTTP(s)** monitor using the public URL of the running service, optionally ending in `/health`. The hosting platform must expose that port publicly and keep the bot process running; the endpoint cannot make a stopped or sleeping host stay awake by itself.
 
+## Persistent player balances on Render
+
+The player balances, inventories, cooldowns, and other game state are stored in SQLite. Render's normal service filesystem is ephemeral: redeploys, restarts, or instance replacement can discard a database stored beside the source code, making players appear to reset to the starting balance. The bot now accepts an absolute `DATABASE_PATH` and prints the selected path at startup; if a legacy `linh_thach.db` exists next to `bot.py`, it copies the database to the configured path once without overwriting an existing destination.
+
+To keep data across deployments, attach a **Render Persistent Disk** to the service with mount path `/var/data`, then set the environment variable `DATABASE_PATH` to `/var/data/linh_thach.db` and redeploy. Merely setting the variable is not enough—the directory must be backed by the attached disk. Check startup logs for `SQLite database: /var/data/linh_thach.db`. If the bot has already reset and the old ephemeral file is gone, the code cannot reconstruct the lost balances; restore a prior backup if available. Keep the same disk and database path when redeploying.
+
 ## Discord HTTP 401
 
 If Discord returns `401 Unauthorized`, the bot token configured in the running environment is invalid, revoked, or copied incorrectly. Create/reset the bot token in the Discord Developer Portal, replace the `DISCORD_TOKEN` secret in the hosting platform, then restart/redeploy the bot. The code trims accidental whitespace and an optional leading `Bot ` prefix, but cannot repair an expired or revoked token. Never commit or share the token.
