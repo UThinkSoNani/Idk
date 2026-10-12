@@ -48,6 +48,7 @@ ROLE_SHOP = [
     ("Đại Thừa", 5_000_000),
 ]
 ROLE_BET_BONUS_PERCENT = (1, 3, 5, 8, 10, 12, 15, 20)
+MAX_ITEM_PURCHASE_QUANTITY = 1000
 ITEM_SHOP = {
     "thien_loi": {
         "name": "⚡ Giáng Thiên Phạt, Bảo Khổ Lung Lay",
@@ -339,12 +340,18 @@ def spend_balance(user_id: int, amount: int):
         return int(balance)
 
 
-def buy_item(user_id: int, item_key: str):
-    """Atomically charge the shop price and add one item to inventory."""
+def buy_item(user_id: int, item_key: str, quantity: int = 1):
+    """Atomically charge for quantity and add that many consumables."""
     item = ITEM_SHOP.get(item_key)
-    if item is None or item.get("kind") == "role":
+    if (
+        item is None
+        or item.get("kind") == "role"
+        or not isinstance(quantity, int)
+        or isinstance(quantity, bool)
+        or not 1 <= quantity <= MAX_ITEM_PURCHASE_QUANTITY
+    ):
         return None
-    price = item["price"]
+    price = item["price"] * quantity
     with sqlite3.connect(DB_FILE, timeout=10) as conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
@@ -361,10 +368,10 @@ def buy_item(user_id: int, item_key: str):
             return None
         conn.execute("""
             INSERT INTO item_inventory (user_id, item_key, quantity)
-            VALUES (?, ?, 1)
+            VALUES (?, ?, ?)
             ON CONFLICT(user_id, item_key)
-            DO UPDATE SET quantity = quantity + 1
-        """, (user_id, item_key))
+            DO UPDATE SET quantity = quantity + excluded.quantity
+        """, (user_id, item_key, quantity))
         balance = conn.execute(
             "SELECT balance FROM users WHERE user_id = ?", (user_id,)
         ).fetchone()[0]
@@ -1668,7 +1675,10 @@ async def cap_do_kiep(interaction: discord.Interaction, item: dict):
     name="mua_vat_pham",
     description="Dùng Linh Thạch mua vật phẩm trong shop"
 )
-@app_commands.describe(vat_pham="Chọn vật phẩm muốn mua")
+@app_commands.describe(
+    vat_pham="Chọn vật phẩm muốn mua",
+    so_luong="Số lượng vật phẩm tiêu thụ muốn mua (1–1000; role chỉ mua 1)"
+)
 @app_commands.choices(vat_pham=[
     app_commands.Choice(
         name=f"{item['name']} — {item['price']:,} Linh Thạch",
@@ -1678,7 +1688,8 @@ async def cap_do_kiep(interaction: discord.Interaction, item: dict):
 ])
 async def mua_vat_pham(
     interaction: discord.Interaction,
-    vat_pham: app_commands.Choice[str]
+    vat_pham: app_commands.Choice[str],
+    so_luong: app_commands.Range[int, 1, MAX_ITEM_PURCHASE_QUANTITY] = 1
 ):
     if interaction.guild is None:
         await interaction.response.send_message(
@@ -1692,23 +1703,31 @@ async def mua_vat_pham(
         )
         return
     if item.get("kind") == "role":
+        if so_luong != 1:
+            await interaction.response.send_message(
+                "❌ Role **Độ Kiếp** không mua theo số lượng; hãy đặt số lượng là **1**.",
+                ephemeral=True
+            )
+            return
         await cap_do_kiep(interaction, item)
         return
 
-    purchase = buy_item(interaction.user.id, vat_pham.value)
+    purchase = buy_item(interaction.user.id, vat_pham.value, so_luong)
     if purchase is None:
         bao_kho = get_balance(interaction.user.id)
+        total_price = item["price"] * so_luong
         await interaction.response.send_message(
             f"❌ Bảo khố không đủ mua **{item['name']}** "
-            f"(giá **{item['price']:,} {CURRENCY_NAME}**). "
+            f"× **{so_luong}** (tổng giá **{total_price:,} {CURRENCY_NAME}**). "
             f"Bảo khố hiện có: **{bao_kho:,} {CURRENCY_NAME}**.",
             ephemeral=True
         )
         return
     balance, quantity = purchase
     await interaction.response.send_message(
-        f"✅ Đã mua **{item['name']}**. Túi đồ hiện có **{quantity}** chiếc; "
-        f"Bảo khố còn **{balance:,} {CURRENCY_NAME}**.",
+        f"✅ Đã mua **{so_luong} × {item['name']}** "
+        f"(tổng giá **{item['price'] * so_luong:,} {CURRENCY_NAME}**). "
+        f"Túi đồ hiện có **{quantity}** chiếc; Bảo khố còn **{balance:,} {CURRENCY_NAME}**.",
         ephemeral=True
     )
 
@@ -2227,7 +2246,7 @@ async def bang_chuc_nang(interaction: discord.Interaction):
             "`/shop` — Xem role tu luyện và giá.\n"
             "`/mua_role` — Mua role kế tiếp bằng Linh Thạch.\n"
             "`/shop_vat_pham` — Xem shop vật phẩm.\n"
-            "`/mua_vat_pham` — Mua vật phẩm bằng Linh Thạch.\n"
+            "`/mua_vat_pham` — Mua vật phẩm; chọn số lượng 1–1.000 (riêng role Độ Kiếp chỉ mua 1).\n"
             "`/kho_vat_pham` — Xem túi vật phẩm.\n"
             "`/dung_vat_pham` — Chọn Thiên Lôi, kích hoạt giáp, dùng Đan Dược hoặc mở Bao Lì Xì nhận thưởng ngẫu nhiên.\n"
             "`/diem_danh` — Điểm danh mỗi 24 giờ.\n"
