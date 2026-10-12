@@ -49,6 +49,10 @@ ROLE_SHOP = [
 ]
 ROLE_BET_BONUS_PERCENT = (1, 3, 5, 8, 10, 12, 15, 20)
 MAX_ITEM_PURCHASE_QUANTITY = 1000
+BAO_LI_XI_MIN_REWARD = 1_000
+BAO_LI_XI_MAX_REWARD = 10_000
+BAO_LI_XI_JACKPOT_REWARD = 1_000_000
+BAO_LI_XI_JACKPOT_ONE_IN = 1_000_000
 ITEM_SHOP = {
     "thien_loi": {
         "name": "⚡ Giáng Thiên Phạt, Bảo Khổ Lung Lay",
@@ -74,7 +78,7 @@ ITEM_SHOP = {
     "bao_li_xi": {
         "name": "🧧 Bao Lì Xì",
         "price": 1_000,
-        "description": "Quay Tay Vận May Sẽ Đến. Random 10–1.000.000 Linh Thạch.",
+        "description": "Quay Tay Vận May Sẽ Đến. Random 1.000–10.000 Linh Thạch.",
         "kind": "consumable",
     },
     "do_kiep": {
@@ -582,13 +586,22 @@ def open_lucky_envelope(
         role_bonus_total = 0
         potion_bonus_total = 0
         for _ in range(quantity):
-            base_reward = random.randint(10, 1_000_000)
+            is_jackpot = random.randrange(BAO_LI_XI_JACKPOT_ONE_IN) == 0
+            if is_jackpot:
+                base_reward = BAO_LI_XI_JACKPOT_REWARD
+            else:
+                base_reward = random.randint(
+                    BAO_LI_XI_MIN_REWARD,
+                    BAO_LI_XI_MAX_REWARD
+                )
             role_bonus = base_reward * max(0, role_bonus_percent) // 100
             potion_bonus = (
                 base_reward * DAN_DUOC_REWARD_BONUS_PERCENT // 100
                 if potion_active else 0
             )
-            envelope_rewards.append(base_reward + role_bonus + potion_bonus)
+            envelope_rewards.append(
+                (base_reward + role_bonus + potion_bonus, is_jackpot)
+            )
             base_total += base_reward
             role_bonus_total += role_bonus
             potion_bonus_total += potion_bonus
@@ -605,7 +618,7 @@ def open_lucky_envelope(
             "INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, ?)",
             (user_id, STARTING_BALANCE)
         )
-        total_reward = sum(envelope_rewards)
+        total_reward = sum(reward for reward, _is_jackpot in envelope_rewards)
         conn.execute(
             "UPDATE users SET balance = balance + ? WHERE user_id = ?",
             (total_reward, user_id)
@@ -1965,10 +1978,11 @@ async def dung_vat_pham(
             )
             return
         envelope_rewards, base_total, role_bonus, potion_bonus, _balance, remaining = result
-        total_reward = sum(envelope_rewards)
+        total_reward = sum(reward for reward, _is_jackpot in envelope_rewards)
+        jackpot_count = sum(1 for _reward, is_jackpot in envelope_rewards if is_jackpot)
         reward_lines = "\n".join(
-            f"{index:02d}) {reward:,}"
-            for index, reward in enumerate(envelope_rewards, start=1)
+            f"{index:02d}) {reward:,}{' ✨' if is_jackpot else ''}"
+            for index, (reward, is_jackpot) in enumerate(envelope_rewards, start=1)
         )
         embed = discord.Embed(
             title="🧧 Kết quả mở Bao Lì Xì",
@@ -1978,13 +1992,14 @@ async def dung_vat_pham(
                 f"Thưởng gốc: {base_total:,} {CURRENCY_NAME}\n"
                 f"Bonus role: +{role_bonus:,} {CURRENCY_NAME}\n"
                 f"Bonus Đan Dược: +{potion_bonus:,} {CURRENCY_NAME}\n"
+                f"Trúng độc đắc: {jackpot_count}\n"
                 f"Bảo khố mới: {_balance:,} {CURRENCY_NAME}\n"
                 f"Bao còn trong túi: {remaining}"
             ),
             color=0xF1C40F
         )
         embed.add_field(
-            name=f"Kết quả từng bao ({CURRENCY_NAME})",
+            name=f"Kết quả từng bao ({CURRENCY_NAME}; ✨ = độc đắc)",
             value=reward_lines,
             inline=False
         )
