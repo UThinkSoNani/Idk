@@ -9,7 +9,7 @@ Code đầy đủ nằm trong [`bot.py`](./bot.py). Hướng dẫn này trích c
 ```python
 ITEM_SHOP = {
     "thien_loi": {
-        "name": "⚡ Thiên Lôi",
+        "name": "⚡ Giáng Thiên Phạt, Bảo Khổ Lung Lay",
         "price": 300_000,
         "description": "Dùng lên người khác để lấy 3% Bảo khố hiện tại.",
         "kind": "consumable",

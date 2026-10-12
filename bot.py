@@ -50,7 +50,7 @@ ROLE_SHOP = [
 ROLE_BET_BONUS_PERCENT = (1, 3, 5, 8, 10, 12, 15, 20)
 ITEM_SHOP = {
     "thien_loi": {
-        "name": "⚡ Thiên Lôi",
+        "name": "⚡ Giáng Thiên Phạt, Bảo Khổ Lung Lay",
         "price": 300_000,
         "description": "Dùng lên người khác để lấy 3% Bảo khố hiện tại.",
         "kind": "consumable",
